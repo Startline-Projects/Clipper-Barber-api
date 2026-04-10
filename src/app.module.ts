@@ -5,10 +5,7 @@ import { AppService } from './app.service';
 import { SupabaseModule } from './supabase/supabase.module';
 
 @Module({
-  imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
-    SupabaseModule,
-  ],
+  imports: [ConfigModule.forRoot({ isGlobal: true }), SupabaseModule],
   controllers: [AppController],
   providers: [AppService],
 })

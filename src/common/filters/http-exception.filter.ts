@@ -1,10 +1,4 @@
-import {
-  ArgumentsHost,
-  Catch,
-  ExceptionFilter,
-  HttpException,
-  HttpStatus,
-} from '@nestjs/common';
+import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus } from '@nestjs/common';
 import { Response } from 'express';
 import Stripe from 'stripe';
 
@@ -45,8 +39,8 @@ export class HttpExceptionFilter implements ExceptionFilter {
       const message =
         typeof exceptionResponse === 'string'
           ? exceptionResponse
-          : (exceptionResponse as Record<string, unknown>).message?.toString() ??
-            exception.message;
+          : ((exceptionResponse as Record<string, unknown>).message?.toString() ??
+            exception.message);
 
       body = {
         error: true,

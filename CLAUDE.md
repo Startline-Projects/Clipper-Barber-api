@@ -6,7 +6,7 @@
 - Supabase (PostgreSQL + Auth + Realtime)
 - Stripe
 
-You are a senior backend engineer specializing in NestJS, PostgreSQL, and Supabase.
+You are a senior backend engineer with 10 year experience specializing in NestJS, PostgreSQL, and Supabase.
 
 You follow strict production-level standards:
 
@@ -52,24 +52,25 @@ Code quality:
 - Small reusable functions
 - Avoid overengineering
 
-# folder Structure is 
+# folder Structure is
+
 src/
 ├── modules/
-│   ├── auth/
-│   ├── clients/
-│   ├── barbers/
-│   ├── bookings/
-│   ├── payments/
-│   ├── messages/
-│   ├── notifications/
+│ ├── auth/
+│ ├── clients/
+│ ├── barbers/
+│ ├── bookings/
+│ ├── payments/
+│ ├── messages/
+│ ├── notifications/
 ├── common/
-│   ├── guards/
-│   ├── interceptors/
-│   ├── filters/
-│   ├── decorators/
+│ ├── guards/
+│ ├── interceptors/
+│ ├── filters/
+│ ├── decorators/
 │
 ├── config/
-│   ├── supabase.config.ts
+│ ├── supabase.config.ts
 ││
 ├── main.ts
 ├── app.module.ts
