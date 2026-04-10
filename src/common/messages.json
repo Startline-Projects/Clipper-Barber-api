@@ -1,0 +1,32 @@
+{
+  "auth": {
+    "MISSING_AUTH_HEADER": "Missing or malformed Authorization header",
+    "INVALID_TOKEN": "Invalid or expired token",
+    "INSUFFICIENT_ROLE": "Insufficient role permissions",
+    "INVALID_CREDENTIALS": "Invalid credentials",
+    "ROLE_MISMATCH": "Role mismatch — wrong app for this account",
+    "INVALID_REFRESH_TOKEN": "Invalid or expired refresh token",
+    "INVALID_RESET_TOKEN": "Invalid or expired reset token",
+    "ACCOUNT_SIGNIN_FAILED": "Account created but failed to sign in"
+  },
+  "barber": {
+    "PROFILE_UPDATE_FAILED": "Failed to update barber profile — profile row may not exist yet",
+    "PROFILE_COMPLETE_FAILED": "Failed to complete barber profile",
+    "PHOTO_UPLOAD_FAILED": "Profile photo upload failed",
+    "PROFILE_LOAD_FAILED": "Failed to load barber profile"
+  },
+  "client": {
+    "USERNAME_TAKEN": "Username already taken",
+    "PROFILE_LOAD_FAILED": "Failed to load client profile"
+  },
+  "password": {
+    "UPDATE_FAILED": "Failed to update password"
+  },
+  "validation": {
+    "PHONE_INVALID": "phone must be a valid phone number (digits, spaces, dashes, parentheses, optional +)",
+    "ZIP_CODE_INVALID": "zipCode must be a valid US zip code (e.g. 78701 or 78701-1234)",
+    "INSTAGRAM_INVALID": "instagramHandle must contain only letters, numbers, dots, and underscores — no @ symbol",
+    "USERNAME_INVALID": "username must contain only letters, numbers, and underscores",
+    "ROLE_INVALID": "role must be either barber or client"
+  }
+}
