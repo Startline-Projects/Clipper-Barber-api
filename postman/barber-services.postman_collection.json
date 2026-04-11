@@ -1,0 +1,864 @@
+{
+  "info": {
+    "name": "Barber Services API",
+    "_postman_id": "barber-services-collection",
+    "description": "Full test suite for the Barber Services CRUD endpoints.\n\n## Setup\n1. Run the **[AUTH] Login as Barber** request first — it auto-sets `{{token}}` and `{{barberId}}` via the test script.\n2. All subsequent requests use those variables automatically.\n\n## Variables used\n| Variable | Set by |\n|---|---|\n| `baseUrl` | Collection variable (default: http://localhost:3001) |\n| `token` | Auto-set after login |\n| `barberId` | Auto-set after login |\n| `serviceId` | Auto-set after the first Create request |",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3001" },
+    { "key": "token", "value": "" },
+    { "key": "barberId", "value": "" },
+    { "key": "serviceId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "🔐 Auth",
+      "item": [
+        {
+          "name": "[AUTH] Login as Barber",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "  pm.collectionVariables.set('token', json.access_token);",
+                  "}",
+                  "if (json.barber?.id) {",
+                  "  pm.collectionVariables.set('barberId', json.barber.id);",
+                  "}",
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('Has access_token', () => pm.expect(json.access_token).to.be.a('string'));",
+                  "pm.test('barberId captured', () => pm.expect(pm.collectionVariables.get('barberId')).to.not.be.empty);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"barber@example.com\",\n  \"password\": \"YourPassword123!\",\n  \"role\": \"barber\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "✅ Happy Path",
+      "item": [
+        {
+          "name": "1. Create Service — Haircut",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('success = true', () => pm.expect(json.success).to.be.true);",
+                  "pm.test('Has service id', () => pm.expect(json.data.id).to.be.a('string'));",
+                  "pm.test('name matches', () => pm.expect(json.data.name).to.eql('Skin Fade'));",
+                  "pm.test('serviceType = haircut', () => pm.expect(json.data.serviceType).to.eql('haircut'));",
+                  "pm.test('durationMinutes = 30', () => pm.expect(json.data.durationMinutes).to.eql(30));",
+                  "pm.test('regularPriceUsd = 35', () => pm.expect(json.data.regularPriceUsd).to.eql(35));",
+                  "pm.test('isActive = true', () => pm.expect(json.data.isActive).to.be.true);",
+                  "pm.test('sortOrder = 0 (first service)', () => pm.expect(json.data.sortOrder).to.eql(0));",
+                  "// Save for later requests",
+                  "pm.collectionVariables.set('serviceId', json.data.id);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Skin Fade\",\n  \"serviceType\": \"haircut\",\n  \"durationMinutes\": 30,\n  \"regularPriceUsd\": 35,\n  \"afterHoursPriceUsd\": 45,\n  \"dayOffPriceUsd\": 55\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services"]
+            }
+          }
+        },
+        {
+          "name": "2. Create Service — Beard Trim (no after-hours prices)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('success = true', () => pm.expect(json.success).to.be.true);",
+                  "pm.test('afterHoursPriceUsd = null', () => pm.expect(json.data.afterHoursPriceUsd).to.be.null);",
+                  "pm.test('dayOffPriceUsd = null', () => pm.expect(json.data.dayOffPriceUsd).to.be.null);",
+                  "pm.test('sortOrder = 1 (second service)', () => pm.expect(json.data.sortOrder).to.eql(1));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Beard Trim\",\n  \"serviceType\": \"beard\",\n  \"durationMinutes\": 15,\n  \"regularPriceUsd\": 20\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services"]
+            }
+          }
+        },
+        {
+          "name": "3. List All Services (incl. inactive)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('success = true', () => pm.expect(json.success).to.be.true);",
+                  "pm.test('data is array', () => pm.expect(json.data).to.be.an('array'));",
+                  "pm.test('At least 2 services', () => pm.expect(json.data.length).to.be.gte(2));",
+                  "pm.test('Ordered by sort_order ASC', () => {",
+                  "  const orders = json.data.map(s => s.sortOrder);",
+                  "  const sorted = [...orders].sort((a, b) => a - b);",
+                  "  pm.expect(orders).to.eql(sorted);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services"]
+            }
+          }
+        },
+        {
+          "name": "4. Get Single Service",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('success = true', () => pm.expect(json.success).to.be.true);",
+                  "pm.test('id matches', () => pm.expect(json.data.id).to.eql(pm.collectionVariables.get('serviceId')));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services/{{serviceId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services", "{{serviceId}}"]
+            }
+          }
+        },
+        {
+          "name": "5. Update Service — change name + add day-off price",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('success = true', () => pm.expect(json.success).to.be.true);",
+                  "pm.test('name updated', () => pm.expect(json.data.name).to.eql('Bald Fade'));",
+                  "pm.test('dayOffPriceUsd updated', () => pm.expect(json.data.dayOffPriceUsd).to.eql(60));",
+                  "pm.test('other fields unchanged', () => pm.expect(json.data.serviceType).to.eql('haircut'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Bald Fade\",\n  \"dayOffPriceUsd\": 60\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services/{{serviceId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services", "{{serviceId}}"]
+            }
+          }
+        },
+        {
+          "name": "6. Update Service — clear after-hours price (null)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('afterHoursPriceUsd cleared to null', () => pm.expect(json.data.afterHoursPriceUsd).to.be.null);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"afterHoursPriceUsd\": null\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services/{{serviceId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services", "{{serviceId}}"]
+            }
+          }
+        },
+        {
+          "name": "7. Toggle Service — deactivate",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('success = true', () => pm.expect(json.success).to.be.true);",
+                  "pm.test('isActive flipped to false', () => pm.expect(json.data.isActive).to.be.false);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services/{{serviceId}}/toggle",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services", "{{serviceId}}", "toggle"]
+            }
+          }
+        },
+        {
+          "name": "8. Toggle Service — re-activate",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('isActive flipped back to true', () => pm.expect(json.data.isActive).to.be.true);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services/{{serviceId}}/toggle",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services", "{{serviceId}}", "toggle"]
+            }
+          }
+        },
+        {
+          "name": "9. Reorder Services",
+          "event": [
+            {
+              "listen": "pre-request",
+              "script": {
+                "exec": [
+                  "// Fetch the current service list to build the reversed order",
+                  "// You can also manually paste IDs into the body below"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('success = true', () => pm.expect(json.success).to.be.true);",
+                  "pm.test('data is array', () => pm.expect(json.data).to.be.an('array'));",
+                  "pm.test('sort_order reassigned starting from 0', () => {",
+                  "  const orders = json.data.map(s => s.sortOrder);",
+                  "  pm.expect(orders[0]).to.eql(0);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"serviceIds\": [\n    \"{{serviceId}}\"\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services/reorder",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services", "reorder"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "❌ Error Cases",
+      "item": [
+        {
+          "name": "[400] Create — missing required field (no name)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('Has error message', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.message).to.be.an('array').that.is.not.empty;",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"serviceType\": \"haircut\",\n  \"durationMinutes\": 30,\n  \"regularPriceUsd\": 35\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services"]
+            }
+          }
+        },
+        {
+          "name": "[400] Create — invalid duration (not 15/30/45/60)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('Validation error mentions durationMinutes', () => {",
+                  "  const body = pm.response.text();",
+                  "  pm.expect(body).to.include('durationMinutes');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Quick Trim\",\n  \"serviceType\": \"haircut\",\n  \"durationMinutes\": 20,\n  \"regularPriceUsd\": 25\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services"]
+            }
+          }
+        },
+        {
+          "name": "[400] Create — invalid serviceType enum value",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('Validation error mentions serviceType', () => {",
+                  "  const body = pm.response.text();",
+                  "  pm.expect(body).to.include('serviceType');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Full Service\",\n  \"serviceType\": \"massage\",\n  \"durationMinutes\": 30,\n  \"regularPriceUsd\": 50\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services"]
+            }
+          }
+        },
+        {
+          "name": "[400] Create — negative price",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('Validation error about min value', () => {",
+                  "  const body = pm.response.text();",
+                  "  pm.expect(body).to.include('regularPriceUsd');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Free Haircut\",\n  \"serviceType\": \"haircut\",\n  \"durationMinutes\": 30,\n  \"regularPriceUsd\": -10\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services"]
+            }
+          }
+        },
+        {
+          "name": "[400] Create — name too long (>100 chars)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('Validation error mentions name', () => {",
+                  "  const body = pm.response.text();",
+                  "  pm.expect(body).to.include('name');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\n  \"serviceType\": \"haircut\",\n  \"durationMinutes\": 30,\n  \"regularPriceUsd\": 35\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services"]
+            }
+          }
+        },
+        {
+          "name": "[400] Reorder — non-UUID in serviceIds",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('Validation error about UUID', () => {",
+                  "  const body = pm.response.text();",
+                  "  pm.expect(body).to.include('serviceIds');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"serviceIds\": [\"not-a-uuid\", \"also-not-a-uuid\"]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services/reorder",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services", "reorder"]
+            }
+          }
+        },
+        {
+          "name": "[401] No auth token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": ["pm.test('Status 401', () => pm.response.to.have.status(401));"],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services"]
+            }
+          }
+        },
+        {
+          "name": "[401] Expired / invalid token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": ["pm.test('Status 401', () => pm.response.to.have.status(401));"],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.obviously.invalid"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services"]
+            }
+          }
+        },
+        {
+          "name": "[403] Client token trying barber endpoint",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 403', () => pm.response.to.have.status(403));",
+                  "pm.test('Forbidden message returned', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.message).to.be.a('string');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer PASTE_CLIENT_TOKEN_HERE" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services"]
+            }
+          }
+        },
+        {
+          "name": "[403] Barber accessing another barber's services",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 403', () => pm.response.to.have.status(403));",
+                  "pm.test('Forbidden — not your barberId', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.message).to.include('own');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/00000000-0000-0000-0000-000000000000/services",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "00000000-0000-0000-0000-000000000000", "services"]
+            }
+          }
+        },
+        {
+          "name": "[404] Get non-existent service",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 404', () => pm.response.to.have.status(404));",
+                  "pm.test('Not found message', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.message).to.be.a('string');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services/00000000-0000-0000-0000-000000000000",
+              "host": ["{{baseUrl}}"],
+              "path": [
+                "barbers",
+                "{{barberId}}",
+                "services",
+                "00000000-0000-0000-0000-000000000000"
+              ]
+            }
+          }
+        },
+        {
+          "name": "[404] Update non-existent service",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": ["pm.test('Status 404', () => pm.response.to.have.status(404));"],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Ghost Service\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services/00000000-0000-0000-0000-000000000000",
+              "host": ["{{baseUrl}}"],
+              "path": [
+                "barbers",
+                "{{barberId}}",
+                "services",
+                "00000000-0000-0000-0000-000000000000"
+              ]
+            }
+          }
+        },
+        {
+          "name": "[404] Toggle non-existent service",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": ["pm.test('Status 404', () => pm.response.to.have.status(404));"],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services/00000000-0000-0000-0000-000000000000/toggle",
+              "host": ["{{baseUrl}}"],
+              "path": [
+                "barbers",
+                "{{barberId}}",
+                "services",
+                "00000000-0000-0000-0000-000000000000",
+                "toggle"
+              ]
+            }
+          }
+        },
+        {
+          "name": "[404] Reorder — service ID belongs to another barber",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 404', () => pm.response.to.have.status(404));",
+                  "pm.test('Error about service IDs not found', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.message).to.include('not found');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"serviceIds\": [\"00000000-0000-0000-0000-000000000001\", \"00000000-0000-0000-0000-000000000002\"]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services/reorder",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services", "reorder"]
+            }
+          }
+        },
+        {
+          "name": "[409] Create — duplicate service name",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "// Run AFTER '1. Create Service — Haircut' so 'Bald Fade' (renamed) already exists",
+                  "pm.test('Status 409', () => pm.response.to.have.status(409));",
+                  "pm.test('Conflict message returned', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.message).to.include('already exists');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Beard Trim\",\n  \"serviceType\": \"beard\",\n  \"durationMinutes\": 15,\n  \"regularPriceUsd\": 20\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services"]
+            }
+          }
+        },
+        {
+          "name": "[409] Update — rename to existing name",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "// Tries to rename service to 'Beard Trim' which already exists",
+                  "pm.test('Status 409', () => pm.response.to.have.status(409));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Beard Trim\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services/{{serviceId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services", "{{serviceId}}"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
