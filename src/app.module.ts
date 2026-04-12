@@ -6,6 +6,7 @@ import { SupabaseModule } from './modules/supabase/supabase.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { ClientsModule } from './modules/clients/clients.module';
 import { BarbersModule } from './modules/barbers/barbers.module';
+import { ScheduleModule } from './modules/schedule/schedule.module';
 import { BookingsModule } from './modules/bookings/bookings.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { MessagesModule } from './modules/messages/messages.module';
@@ -18,6 +19,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
     AuthModule,
     ClientsModule,
     BarbersModule,
+    ScheduleModule,
     BookingsModule,
     PaymentsModule,
     MessagesModule,
