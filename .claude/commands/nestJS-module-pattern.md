@@ -8,6 +8,7 @@ description: >
   "add a users feature" or "make an endpoint for orders". The skill enforces all project
   conventions: typed return values, DTO validation via class-validator, Swagger decorators,
   consistent error shape, and explicit public/private visibility on every method.
+  All logic and check on service not controller
 ---
 
 # NestJS Domain Architecture Skill

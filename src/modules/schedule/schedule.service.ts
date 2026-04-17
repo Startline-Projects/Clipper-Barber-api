@@ -69,18 +69,20 @@ export class ScheduleService {
     };
   }
 
-  // Returns barber.id (UUID), not the auth user_id
+  // Ensures the auth user has a barbers row (i.e., finished enough of onboarding).
+  // Returns the auth user id — which is also the FK value for barber_schedules.barber_id
+  // now that the schema references auth.users(id) directly.
   private async resolveBarber(authUserId: string): Promise<string> {
     const { data, error } = await this.db
       .from('barbers')
-      .select('id')
+      .select('user_id')
       .eq('user_id', authUserId)
       .maybeSingle();
 
     if (error) throw error;
     if (!data) throw new Forbidden('No barber profile found for this user');
 
-    return (data as { id: string }).id;
+    return authUserId;
   }
 
   // Lexicographic comparison is correct for zero-padded "HH:mm" strings

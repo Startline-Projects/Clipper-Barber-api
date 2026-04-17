@@ -225,7 +225,9 @@ export class AuthService {
         throw new NotFoundException('Barber profile not found');
       }
 
-      return data as BarberProfileResponseDto;
+      return this.projectCanonicalId(
+        data as Record<string, unknown>,
+      ) as unknown as BarberProfileResponseDto;
     }
 
     const { data, error } = await this.client
@@ -242,7 +244,15 @@ export class AuthService {
       throw new NotFoundException('Client profile not found');
     }
 
-    return data as Record<string, unknown>;
+    return this.projectCanonicalId(data as Record<string, unknown>);
+  }
+
+  // Profile rows still carry both the internal `id` (barbers.id / clients.id)
+  // and `user_id` (auth.users.id). For API responses we expose only the auth id
+  // — under the field name `id` — so every endpoint speaks the same identifier.
+  private projectCanonicalId(row: Record<string, unknown>): Record<string, unknown> {
+    const { id: _internalId, user_id, ...rest } = row;
+    return { id: user_id, ...rest };
   }
 
   public async forgotPassword(email: string): Promise<SuccessResponseDto> {
