@@ -1,0 +1,1227 @@
+{
+  "info": {
+    "name": "Schedule API",
+    "_postman_id": "schedule-collection",
+    "description": "Full test suite for GET /schedule and PATCH /schedule/:dayOfWeek.\n\n## Setup\n1. Run **[AUTH] Login as Barber** first — auto-sets `{{token}}`.\n2. All subsequent requests use that token automatically.\n\n## Variables\n| Variable | Set by |\n|---|---|\n| `baseUrl` | Collection variable (default: http://localhost:3001) |\n| `token` | Auto-set after barber login |\n| `clientToken` | Auto-set after client login (used in 403 tests) |\n\n## Day of week reference\n| Value | Day |\n|---|---|\n| 0 | Sunday |\n| 1 | Monday |\n| 2 | Tuesday |\n| 3 | Wednesday |\n| 4 | Thursday |\n| 5 | Friday |\n| 6 | Saturday |",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3001" },
+    { "key": "token", "value": "" },
+    { "key": "clientToken", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "🔐 Auth",
+      "item": [
+        {
+          "name": "[AUTH] Login as Barber",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "  pm.collectionVariables.set('token', json.access_token);",
+                  "}",
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('Has access_token', () => pm.expect(json.access_token).to.be.a('string'));",
+                  "pm.test('token captured', () => pm.expect(pm.collectionVariables.get('token')).to.not.be.empty);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"barber@example.com\",\n  \"password\": \"YourPassword123!\",\n  \"role\": \"barber\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            }
+          }
+        },
+        {
+          "name": "[AUTH] Login as Client",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "  pm.collectionVariables.set('clientToken', json.access_token);",
+                  "}",
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('clientToken captured', () => pm.expect(pm.collectionVariables.get('clientToken')).to.not.be.empty);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"client@example.com\",\n  \"password\": \"YourPassword123!\",\n  \"role\": \"client\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "✅ Happy Path",
+      "item": [
+        {
+          "name": "1. GET /schedule — all 7 days",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('success = true', () => pm.expect(json.success).to.be.true);",
+                  "pm.test('data is array of 7', () => {",
+                  "  pm.expect(json.data).to.be.an('array').with.lengthOf(7);",
+                  "});",
+                  "pm.test('days 0-6 all present', () => {",
+                  "  const days = json.data.map(d => d.dayOfWeek).sort((a,b) => a - b);",
+                  "  pm.expect(days).to.deep.equal([0,1,2,3,4,5,6]);",
+                  "});",
+                  "pm.test('each row has required fields', () => {",
+                  "  json.data.forEach(d => {",
+                  "    pm.expect(d).to.have.all.keys(",
+                  "      'id','barberId','dayOfWeek','isWorking','regularStartTime',",
+                  "      'regularEndTime','slotDurationMinutes','afterHoursEnabled',",
+                  "      'afterHoursStart','afterHoursEnd','dayOffBookingEnabled',",
+                  "      'dayOffStartTime','dayOffEndTime','advanceNoticeMinutes',",
+                  "      'createdAt','updatedAt'",
+                  "    );",
+                  "  });",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/schedule",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule"]
+            }
+          }
+        },
+        {
+          "name": "2. PATCH /schedule/1 — toggle isWorking on + set times",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('success = true', () => pm.expect(json.success).to.be.true);",
+                  "pm.test('dayOfWeek is 1', () => pm.expect(json.data.dayOfWeek).to.equal(1));",
+                  "pm.test('isWorking is true', () => pm.expect(json.data.isWorking).to.be.true);",
+                  "pm.test('regularStartTime is 09:00', () => pm.expect(json.data.regularStartTime).to.equal('09:00'));",
+                  "pm.test('regularEndTime is 17:00', () => pm.expect(json.data.regularEndTime).to.equal('17:00'));",
+                  "pm.test('slotDurationMinutes is 30', () => pm.expect(json.data.slotDurationMinutes).to.equal(30));",
+                  "pm.test('updatedAt is fresh', () => {",
+                  "  const updated = new Date(json.data.updatedAt).getTime();",
+                  "  pm.expect(updated).to.be.closeTo(Date.now(), 5000);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": true,\n  \"regularStartTime\": \"09:00\",\n  \"regularEndTime\": \"17:00\",\n  \"slotDurationMinutes\": 30,\n  \"advanceNoticeMinutes\": 60\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        },
+        {
+          "name": "3. PATCH /schedule/1 — enable after-hours",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('afterHoursEnabled is true', () => pm.expect(json.data.afterHoursEnabled).to.be.true);",
+                  "pm.test('afterHoursStart is 18:00', () => pm.expect(json.data.afterHoursStart).to.equal('18:00'));",
+                  "pm.test('afterHoursEnd is 21:00', () => pm.expect(json.data.afterHoursEnd).to.equal('21:00'));",
+                  "pm.test('isWorking still true (merge preserved)', () => pm.expect(json.data.isWorking).to.be.true);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"afterHoursEnabled\": true,\n  \"afterHoursStart\": \"18:00\",\n  \"afterHoursEnd\": \"21:00\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        },
+        {
+          "name": "4. PATCH /schedule/1 — after-hours start exactly at regular end (boundary)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200 — start == regularEnd is allowed', () => pm.response.to.have.status(200));",
+                  "pm.test('afterHoursStart equals regularEndTime', () => {",
+                  "  pm.expect(json.data.afterHoursStart).to.equal(json.data.regularEndTime);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"afterHoursEnabled\": true,\n  \"afterHoursStart\": \"17:00\",\n  \"afterHoursEnd\": \"20:00\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        },
+        {
+          "name": "5. PATCH /schedule/0 — day off with booking window",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('isWorking is false', () => pm.expect(json.data.isWorking).to.be.false);",
+                  "pm.test('dayOffBookingEnabled is true', () => pm.expect(json.data.dayOffBookingEnabled).to.be.true);",
+                  "pm.test('dayOffStartTime is 10:00', () => pm.expect(json.data.dayOffStartTime).to.equal('10:00'));",
+                  "pm.test('dayOffEndTime is 14:00', () => pm.expect(json.data.dayOffEndTime).to.equal('14:00'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": false,\n  \"dayOffBookingEnabled\": true,\n  \"dayOffStartTime\": \"10:00\",\n  \"dayOffEndTime\": \"14:00\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/0",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "0"]
+            }
+          }
+        },
+        {
+          "name": "6. PATCH /schedule/2 — partial update (only advanceNoticeMinutes)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('advanceNoticeMinutes updated to 120', () => pm.expect(json.data.advanceNoticeMinutes).to.equal(120));",
+                  "pm.test('other fields unchanged (isWorking preserved)', () => {",
+                  "  pm.expect(json.data.isWorking).to.be.a('boolean');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"advanceNoticeMinutes\": 120\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/2",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "2"]
+            }
+          }
+        },
+        {
+          "name": "7. PATCH /schedule/3 — advanceNoticeMinutes = 0 (boundary, valid)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200 — zero advance notice is allowed', () => pm.response.to.have.status(200));",
+                  "pm.test('advanceNoticeMinutes is 0', () => pm.expect(json.data.advanceNoticeMinutes).to.equal(0));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"advanceNoticeMinutes\": 0\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/3",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "3"]
+            }
+          }
+        },
+        {
+          "name": "8. PATCH /schedule/4 — all 4 valid slot durations (60 min)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('slotDurationMinutes is 60', () => pm.expect(json.data.slotDurationMinutes).to.equal(60));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": true,\n  \"regularStartTime\": \"08:00\",\n  \"regularEndTime\": \"16:00\",\n  \"slotDurationMinutes\": 60\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/4",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "4"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "❌ Auth Failures",
+      "item": [
+        {
+          "name": "FAIL — GET /schedule no token → 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 401', () => pm.response.to.have.status(401));",
+                  "pm.test('error = true', () => pm.expect(pm.response.json().error).to.be.true);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/schedule",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule"]
+            }
+          }
+        },
+        {
+          "name": "FAIL — GET /schedule client token → 403",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 403', () => pm.response.to.have.status(403));",
+                  "pm.test('error = true', () => pm.expect(pm.response.json().error).to.be.true);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/schedule",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule"]
+            }
+          }
+        },
+        {
+          "name": "FAIL — PATCH /schedule/1 no token → 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 401', () => pm.response.to.have.status(401));",
+                  "pm.test('error = true', () => pm.expect(pm.response.json().error).to.be.true);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": false\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "❌ Rule A — isWorking=true requires regular times",
+      "item": [
+        {
+          "name": "FAIL — isWorking true, no times in payload, DB row has no times",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('error = true', () => pm.expect(json.error).to.be.true);",
+                  "pm.test('code is INVALID_REGULAR_HOURS', () => pm.expect(json.code).to.equal('INVALID_REGULAR_HOURS'));",
+                  "pm.test('message mentions regularStartTime or regularEndTime', () => {",
+                  "  pm.expect(json.message.toLowerCase()).to.include('regular');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/6",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "6"]
+            }
+          }
+        },
+        {
+          "name": "FAIL — isWorking true, only start time, no end time",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is INVALID_REGULAR_HOURS', () => pm.expect(json.code).to.equal('INVALID_REGULAR_HOURS'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": true,\n  \"regularStartTime\": \"09:00\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/6",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "6"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "❌ Rule E — regularStart must be before regularEnd",
+      "item": [
+        {
+          "name": "FAIL — regularStartTime == regularEndTime",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is INVALID_REGULAR_HOURS', () => pm.expect(json.code).to.equal('INVALID_REGULAR_HOURS'));",
+                  "pm.test('message mentions before/start/end', () => {",
+                  "  pm.expect(json.message.toLowerCase()).to.match(/before|start|end/);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": true,\n  \"regularStartTime\": \"09:00\",\n  \"regularEndTime\": \"09:00\",\n  \"slotDurationMinutes\": 30\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        },
+        {
+          "name": "FAIL — regularStartTime after regularEndTime",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is INVALID_REGULAR_HOURS', () => pm.expect(json.code).to.equal('INVALID_REGULAR_HOURS'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": true,\n  \"regularStartTime\": \"18:00\",\n  \"regularEndTime\": \"09:00\",\n  \"slotDurationMinutes\": 30\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "❌ Rule B — after-hours validation",
+      "item": [
+        {
+          "name": "FAIL — afterHoursEnabled true, no times",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is INVALID_AFTER_HOURS', () => pm.expect(json.code).to.equal('INVALID_AFTER_HOURS'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": true,\n  \"regularStartTime\": \"09:00\",\n  \"regularEndTime\": \"17:00\",\n  \"afterHoursEnabled\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        },
+        {
+          "name": "FAIL — afterHoursStart before regularEndTime",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is INVALID_AFTER_HOURS', () => pm.expect(json.code).to.equal('INVALID_AFTER_HOURS'));",
+                  "pm.test('message mentions afterHoursStart or regularEndTime', () => {",
+                  "  pm.expect(json.message.toLowerCase()).to.match(/afterhoursstart|after.hours.start|regular/i);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": true,\n  \"regularStartTime\": \"09:00\",\n  \"regularEndTime\": \"17:00\",\n  \"afterHoursEnabled\": true,\n  \"afterHoursStart\": \"16:00\",\n  \"afterHoursEnd\": \"20:00\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        },
+        {
+          "name": "FAIL — afterHoursEnd == afterHoursStart",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is INVALID_AFTER_HOURS', () => pm.expect(json.code).to.equal('INVALID_AFTER_HOURS'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": true,\n  \"regularStartTime\": \"09:00\",\n  \"regularEndTime\": \"17:00\",\n  \"afterHoursEnabled\": true,\n  \"afterHoursStart\": \"18:00\",\n  \"afterHoursEnd\": \"18:00\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        },
+        {
+          "name": "FAIL — afterHoursEnd before afterHoursStart",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is INVALID_AFTER_HOURS', () => pm.expect(json.code).to.equal('INVALID_AFTER_HOURS'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": true,\n  \"regularStartTime\": \"09:00\",\n  \"regularEndTime\": \"17:00\",\n  \"afterHoursEnabled\": true,\n  \"afterHoursStart\": \"20:00\",\n  \"afterHoursEnd\": \"18:00\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "❌ Rule D — DAY_OFF_CONFLICT",
+      "item": [
+        {
+          "name": "FAIL — isWorking=true AND dayOffBookingEnabled=true (same payload)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is DAY_OFF_CONFLICT', () => pm.expect(json.code).to.equal('DAY_OFF_CONFLICT'));",
+                  "pm.test('message mentions non-working days', () => {",
+                  "  pm.expect(json.message.toLowerCase()).to.include('non-working');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": true,\n  \"regularStartTime\": \"09:00\",\n  \"regularEndTime\": \"17:00\",\n  \"dayOffBookingEnabled\": true,\n  \"dayOffStartTime\": \"10:00\",\n  \"dayOffEndTime\": \"14:00\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        },
+        {
+          "name": "FAIL — day already isWorking=true in DB, send dayOffBookingEnabled=true",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400 — isWorking already true in DB triggers conflict', () => pm.response.to.have.status(400));",
+                  "pm.test('code is DAY_OFF_CONFLICT', () => pm.expect(json.code).to.equal('DAY_OFF_CONFLICT'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"dayOffBookingEnabled\": true,\n  \"dayOffStartTime\": \"10:00\",\n  \"dayOffEndTime\": \"14:00\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "❌ Rule C+F — day-off hours validation",
+      "item": [
+        {
+          "name": "FAIL — dayOffBookingEnabled=true, no day-off times",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is INVALID_DAY_OFF_HOURS', () => pm.expect(json.code).to.equal('INVALID_DAY_OFF_HOURS'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": false,\n  \"dayOffBookingEnabled\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/0",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "0"]
+            }
+          }
+        },
+        {
+          "name": "FAIL — dayOffBookingEnabled=true, only start time",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is INVALID_DAY_OFF_HOURS', () => pm.expect(json.code).to.equal('INVALID_DAY_OFF_HOURS'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": false,\n  \"dayOffBookingEnabled\": true,\n  \"dayOffStartTime\": \"10:00\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/0",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "0"]
+            }
+          }
+        },
+        {
+          "name": "FAIL — dayOffStartTime == dayOffEndTime",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is INVALID_DAY_OFF_HOURS', () => pm.expect(json.code).to.equal('INVALID_DAY_OFF_HOURS'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": false,\n  \"dayOffBookingEnabled\": true,\n  \"dayOffStartTime\": \"12:00\",\n  \"dayOffEndTime\": \"12:00\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/0",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "0"]
+            }
+          }
+        },
+        {
+          "name": "FAIL — dayOffStartTime after dayOffEndTime",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is INVALID_DAY_OFF_HOURS', () => pm.expect(json.code).to.equal('INVALID_DAY_OFF_HOURS'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": false,\n  \"dayOffBookingEnabled\": true,\n  \"dayOffStartTime\": \"15:00\",\n  \"dayOffEndTime\": \"10:00\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/0",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "0"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "❌ Rule G — invalid slot duration",
+      "item": [
+        {
+          "name": "FAIL — slotDurationMinutes = 20 (not in [15,30,45,60])",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is INVALID_SLOT_DURATION', () => pm.expect(json.code).to.equal('INVALID_SLOT_DURATION'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": true,\n  \"regularStartTime\": \"09:00\",\n  \"regularEndTime\": \"17:00\",\n  \"slotDurationMinutes\": 20\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        },
+        {
+          "name": "FAIL — slotDurationMinutes = 0",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is INVALID_SLOT_DURATION or validation error', () => {",
+                  "  pm.expect(['INVALID_SLOT_DURATION', 'BAD_REQUEST_EXCEPTION']).to.include(json.code);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": true,\n  \"regularStartTime\": \"09:00\",\n  \"regularEndTime\": \"17:00\",\n  \"slotDurationMinutes\": 0\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "❌ Rule H — invalid advance notice",
+      "item": [
+        {
+          "name": "FAIL — advanceNoticeMinutes = -1",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('code is INVALID_ADVANCE_NOTICE or validation error', () => {",
+                  "  pm.expect(['INVALID_ADVANCE_NOTICE', 'BAD_REQUEST_EXCEPTION']).to.include(json.code);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"advanceNoticeMinutes\": -1\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "❌ DTO validation (malformed input)",
+      "item": [
+        {
+          "name": "FAIL — time format invalid (no colon)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('error = true', () => pm.expect(json.error).to.be.true);",
+                  "pm.test('message mentions HH:mm', () => {",
+                  "  pm.expect(json.message.toLowerCase()).to.include('hh:mm');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"regularStartTime\": \"9am\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        },
+        {
+          "name": "FAIL — time hour out of range (25:00)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('error = true', () => pm.expect(json.error).to.be.true);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"regularStartTime\": \"25:00\",\n  \"regularEndTime\": \"17:00\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        },
+        {
+          "name": "FAIL — isWorking is a string not boolean",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400 — DTO rejects string for boolean field', () => pm.response.to.have.status(400));",
+                  "pm.test('error = true', () => pm.expect(json.error).to.be.true);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": \"yes\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        },
+        {
+          "name": "FAIL — slotDurationMinutes is a float (not integer)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 400 — float rejected for integer field', () => pm.response.to.have.status(400));",
+                  "pm.test('error = true', () => pm.expect(json.error).to.be.true);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"slotDurationMinutes\": 30.5\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/1",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "1"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "❌ SCHEDULE_NOT_FOUND",
+      "item": [
+        {
+          "name": "FAIL — dayOfWeek = 7 (out of range, no row in DB)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 404', () => pm.response.to.have.status(404));",
+                  "pm.test('code is SCHEDULE_NOT_FOUND', () => pm.expect(json.code).to.equal('SCHEDULE_NOT_FOUND'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": false\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/7",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "7"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
