@@ -1,11 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class BarberProfileResponseDto {
-  @ApiProperty()
+  @ApiProperty({ description: 'Canonical user id — same value as auth.users.id' })
   id: string;
-
-  @ApiProperty()
-  user_id: string;
 
   @ApiProperty()
   full_name: string;

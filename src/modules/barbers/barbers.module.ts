@@ -1,11 +1,22 @@
 import { Module } from '@nestjs/common';
-import { BarbersController } from './barbers.controller';
+import {
+  BarbersController,
+  BarberBookingsController,
+  BarberSettingsController,
+} from './barbers.controller';
 import { BarbersService } from './barbers.service';
 import { BarberServicesController } from './services/barber-services.controller';
 import { BarberServicesService } from './services/barber-services.service';
+import { BookingsModule } from '../bookings/bookings.module';
 
 @Module({
-  controllers: [BarbersController, BarberServicesController],
+  imports: [BookingsModule],
+  controllers: [
+    BarbersController,
+    BarberBookingsController,
+    BarberSettingsController,
+    BarberServicesController,
+  ],
   providers: [BarbersService, BarberServicesService],
   exports: [BarberServicesService],
 })

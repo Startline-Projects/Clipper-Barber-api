@@ -56,7 +56,6 @@ export class SupabaseService {
     }
 
     const u = data.user;
-
     return {
       sub: u.id,
       email: u.email ?? '',
