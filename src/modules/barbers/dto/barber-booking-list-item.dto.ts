@@ -22,6 +22,7 @@ export class BarberBookingListItemDto {
   @ApiProperty() totalPrice: number;
   @ApiProperty({ enum: BookingStatusDto }) status: BookingStatusDto;
   @ApiProperty() isRecurring: boolean;
+  @ApiProperty({ nullable: true, type: String }) recurringBookingId: string | null;
   @ApiProperty() createdAt: string;
 }
 

@@ -10,6 +10,7 @@ import { BookingTypeDto } from '../bookings/dto/preview-booking.dto';
 import {
   BookingStatusDto,
   BookingTimeframeDto,
+  BookingTypeFilterDto,
   ListBarberBookingsQueryDto,
 } from './dto/list-barber-bookings-query.dto';
 import {
@@ -25,20 +26,21 @@ import { CancelBarberBookingResponseDto } from './dto/cancel-barber-booking-resp
 import { CompleteBookingResponseDto } from './dto/complete-booking-response.dto';
 import { NoShowBookingResponseDto } from './dto/no-show-response.dto';
 import { AutoConfirmSettingsResponseDto } from './dto/auto-confirm-settings-response.dto';
+import { RecurringEnabledResponseDto } from './dto/update-recurring-enabled.dto';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 50;
 
 const LIST_SELECT = `
   id, scheduled_at, booking_type, price_usd, status, created_at,
-  duration_minutes, recurring_occurrence_id,
+  duration_minutes, recurring_booking_id,
   barber_service_id,
   client_id
 `;
 
 const DETAIL_SELECT = `
   id, scheduled_at, booking_type, status, created_at,
-  duration_minutes, recurring_occurrence_id,
+  duration_minutes, recurring_booking_id,
   base_price_usd, slot_type_surcharge_usd, price_usd,
   confirmed_at, cancelled_at, cancelled_by,
   no_show_charged, no_show_charge_amount_usd,
@@ -53,7 +55,7 @@ interface BookingRowForList {
   status: string;
   created_at: string;
   duration_minutes: number | null;
-  recurring_occurrence_id: string | null;
+  recurring_booking_id: string | null;
   barber_service_id: string | null;
   client_id: string;
 }
@@ -65,7 +67,7 @@ interface BookingRowForDetail {
   status: string;
   created_at: string;
   duration_minutes: number | null;
-  recurring_occurrence_id: string | null;
+  recurring_booking_id: string | null;
   base_price_usd: string | number | null;
   slot_type_surcharge_usd: string | number | null;
   price_usd: string | number;
@@ -126,6 +128,12 @@ export class BarbersService {
     if (query.bookingType) q = q.eq('booking_type', query.bookingType);
     if (query.status) q = q.eq('status', query.status);
 
+    if (query.type === BookingTypeFilterDto.ONE_OFF) {
+      q = q.is('recurring_booking_id', null);
+    } else if (query.type === BookingTypeFilterDto.RECURRING) {
+      q = q.not('recurring_booking_id', 'is', null);
+    }
+
     if (cursorRow) {
       if (ascending) {
         q = q.or(
@@ -173,7 +181,8 @@ export class BarbersService {
         bookingType: r.booking_type as BookingTypeDto,
         totalPrice: Number(r.price_usd),
         status: r.status as BookingStatusDto,
-        isRecurring: !!r.recurring_occurrence_id,
+        isRecurring: r.recurring_booking_id !== null,
+        recurringBookingId: r.recurring_booking_id,
         createdAt: new Date(r.created_at).toISOString(),
       };
     });
@@ -252,7 +261,8 @@ export class BarbersService {
           ? Number(row.no_show_charge_amount_usd)
           : null,
       reviewLeftByClient: (reviewCount ?? 0) > 0,
-      isRecurring: !!row.recurring_occurrence_id,
+      isRecurring: row.recurring_booking_id !== null,
+      recurringBookingId: row.recurring_booking_id,
       createdAt: new Date(row.created_at).toISOString(),
     };
 
@@ -411,6 +421,23 @@ export class BarbersService {
     enabled: boolean
   ): Promise<AutoConfirmSettingsResponseDto> {
     return this.updateAutoConfirmFlag(barberId, { auto_confirm_today: enabled });
+  }
+
+  public async updateRecurringEnabled(
+    barberId: string,
+    enabled: boolean
+  ): Promise<RecurringEnabledResponseDto> {
+    const { data, error } = await this.db
+      .from('barbers')
+      .update({ recurring_enabled: enabled })
+      .eq('user_id', barberId)
+      .select('recurring_enabled')
+      .maybeSingle();
+
+    if (error) throw new InternalServerErrorException('Failed to update recurring flag');
+    if (!data) throw new NotFoundException('Barber profile not found');
+
+    return { recurringEnabled: data.recurring_enabled as boolean };
   }
 
   // ────────────────────────────────────────────────────────────

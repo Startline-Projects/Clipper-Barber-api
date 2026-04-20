@@ -27,6 +27,10 @@ import { CompleteBookingResponseDto } from './dto/complete-booking-response.dto'
 import { NoShowBookingResponseDto } from './dto/no-show-response.dto';
 import { UpdateAutoConfirmDto } from './dto/update-auto-confirm.dto';
 import { AutoConfirmSettingsResponseDto } from './dto/auto-confirm-settings-response.dto';
+import {
+  RecurringEnabledResponseDto,
+  UpdateRecurringEnabledDto,
+} from './dto/update-recurring-enabled.dto';
 
 @ApiTags('Barbers')
 @Controller('barbers')
@@ -144,5 +148,19 @@ export class BarberSettingsController {
     @Body() dto: UpdateAutoConfirmDto
   ): Promise<AutoConfirmSettingsResponseDto> {
     return this.barbersService.updateAutoConfirmToday(user.sub, dto.enabled);
+  }
+
+  @Patch('recurring')
+  @ApiOperation({
+    summary:
+      'Barber-level manual override for recurring availability. Auto-synced by schedule updates; this manual toggle overrides until the next schedule save.',
+  })
+  @ApiBody({ type: UpdateRecurringEnabledDto })
+  @ApiResponse({ status: 200, type: RecurringEnabledResponseDto })
+  public async updateRecurringEnabled(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Body() dto: UpdateRecurringEnabledDto
+  ): Promise<RecurringEnabledResponseDto> {
+    return this.barbersService.updateRecurringEnabled(user.sub, dto.enabled);
   }
 }

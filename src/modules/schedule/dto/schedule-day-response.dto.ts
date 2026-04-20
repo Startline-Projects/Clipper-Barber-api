@@ -44,6 +44,23 @@ export class ScheduleDayDto {
   advanceNoticeMinutes: number;
 
   @ApiProperty()
+  recurringEnabled: boolean;
+
+  @ApiProperty({
+    example: 'weekly',
+    nullable: true,
+    description: 'weekly | biweekly | both — null when recurring is disabled for this day',
+  })
+  recurringFrequency: 'weekly' | 'biweekly' | 'both' | null;
+
+  @ApiProperty({
+    example: 10.0,
+    nullable: true,
+    description: 'Flat surcharge added on top of service.recurringPriceUsd for this day',
+  })
+  recurringExtraChargeUsd: number | null;
+
+  @ApiProperty()
   createdAt: string;
 
   @ApiProperty()

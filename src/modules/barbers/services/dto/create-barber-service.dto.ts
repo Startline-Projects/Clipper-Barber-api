@@ -49,4 +49,13 @@ export class CreateBarberServiceDto {
   @IsNumber()
   @Min(0)
   dayOffPriceUsd?: number;
+
+  @ApiPropertyOptional({
+    example: 40.0,
+    description: 'Per-occurrence recurring price in USD. Null/omitted = this service does not support recurring bookings.',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  recurringPriceUsd?: number;
 }

@@ -1,0 +1,1041 @@
+{
+  "info": {
+    "name": "Recurring Bookings API",
+    "_postman_id": "recurring-bookings-collection",
+    "description": "End-to-end test suite for the recurring booking feature.\n\n## Flow covered\n1. **Setup** — log in as barber and client, capture tokens.\n2. **Barber prep** — ensure the service has `recurringPriceUsd` set, enable recurring on Tuesday (dayOfWeek=2), verify barber-level flag is auto-synced.\n3. **Client discovery** — list recurring-eligible services, fetch recurring slots for Tuesday.\n4. **Happy path** — client creates a recurring request → barber accepts → generator fires → bookings appear in `/client/bookings?type=recurring`.\n5. **Detail + occurrences** — both roles fetch detail with past/upcoming occurrences.\n6. **Pause / resume / cancel** — exercise all three, assert status transitions.\n7. **Renewal** — client renews a cancelled subscription, barber accepts again.\n8. **Error cases** — wrong day, wrong frequency, duplicate slot, wrong role, expired status, unauthorised access.\n\n## Setup\n1. Run **[AUTH] Login as Barber** and **[AUTH] Login as Client** first — auto-sets `{{barberToken}}`, `{{clientToken}}`, `{{barberId}}`, `{{clientId}}`.\n2. Run **[PREP] ...** items once to prepare the service + schedule + ids.\n3. Run the rest in order. Skip sections by collapsing folders.\n\n## Variables\n| Variable | Set by |\n|---|---|\n| `baseUrl` | Collection variable (default http://localhost:3001) |\n| `barberToken` / `clientToken` | Login scripts |\n| `barberId` / `clientId` | Login scripts |\n| `serviceId` | [PREP] create or list services |\n| `recurringId` | Client create request test |\n| `renewalId` | Renewal test |\n\n## Notes\n- `dayOfWeek=2` is Tuesday. Change it in the collection variables if your local calendar makes testing easier on another day.\n- The 60-day window is generated synchronously during **Barber accepts** — expect that call to take longer than other endpoints.\n- `pauseStartDate` must not be in the past; the test script computes a future date on the fly.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3001" },
+    { "key": "barberEmail", "value": "barber@example.com" },
+    { "key": "barberPassword", "value": "YourPassword123!" },
+    { "key": "clientEmail", "value": "client@example.com" },
+    { "key": "clientPassword", "value": "YourPassword123!" },
+    { "key": "barberToken", "value": "" },
+    { "key": "clientToken", "value": "" },
+    { "key": "barberId", "value": "" },
+    { "key": "clientId", "value": "" },
+    { "key": "serviceId", "value": "" },
+    { "key": "recurringId", "value": "" },
+    { "key": "renewalId", "value": "" },
+    { "key": "dayOfWeek", "value": "2" },
+    { "key": "slotTime", "value": "09:00" }
+  ],
+  "item": [
+    {
+      "name": "1. Auth",
+      "item": [
+        {
+          "name": "[AUTH] Login as Barber",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('accessToken returned', () => pm.expect(json.accessToken).to.be.a('string'));",
+                  "pm.test('role is barber (redirectTo absent or a known step)', () => {",
+                  "  if (json.redirectTo) pm.expect(json.redirectTo).to.match(/barber\\//);",
+                  "});",
+                  "pm.collectionVariables.set('barberToken', json.accessToken);",
+                  "pm.collectionVariables.set('barberId', json.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{barberEmail}}\",\n  \"password\": \"{{barberPassword}}\",\n  \"role\": \"barber\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            }
+          }
+        },
+        {
+          "name": "[AUTH] Login as Client",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('accessToken returned', () => pm.expect(json.accessToken).to.be.a('string'));",
+                  "pm.collectionVariables.set('clientToken', json.accessToken);",
+                  "pm.collectionVariables.set('clientId', json.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{clientEmail}}\",\n  \"password\": \"{{clientPassword}}\",\n  \"role\": \"client\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Barber Prep",
+      "item": [
+        {
+          "name": "[PREP] List services (capture first recurring-eligible serviceId)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('data is array', () => pm.expect(json.data).to.be.an('array'));",
+                  "const services = json.data || [];",
+                  "const preferred = services.find(s => s.isActive && s.recurringPriceUsd != null) || services.find(s => s.isActive) || services[0];",
+                  "if (preferred) pm.collectionVariables.set('serviceId', preferred.id);",
+                  "pm.test('serviceId captured', () => pm.expect(pm.collectionVariables.get('serviceId')).to.not.be.empty);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{barberToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services"]
+            }
+          }
+        },
+        {
+          "name": "[PREP] Update service — set recurringPriceUsd = 40",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('recurringPriceUsd persisted', () => pm.expect(json.data.recurringPriceUsd).to.eql(40));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{barberToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"recurringPriceUsd\": 40\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services/{{serviceId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services", "{{serviceId}}"]
+            }
+          }
+        },
+        {
+          "name": "[PREP] Enable recurring on schedule day (Tuesday)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('recurringEnabled=true', () => pm.expect(json.data.recurringEnabled).to.eql(true));",
+                  "pm.test('recurringFrequency is both', () => pm.expect(json.data.recurringFrequency).to.eql('both'));",
+                  "pm.test('recurringExtraChargeUsd=15', () => pm.expect(Number(json.data.recurringExtraChargeUsd)).to.eql(15));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{barberToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isWorking\": true,\n  \"regularStartTime\": \"09:00\",\n  \"regularEndTime\": \"17:00\",\n  \"slotDurationMinutes\": 30,\n  \"recurringEnabled\": true,\n  \"recurringFrequency\": \"both\",\n  \"recurringExtraChargeUsd\": 15\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/schedule/{{dayOfWeek}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule", "{{dayOfWeek}}"]
+            }
+          }
+        },
+        {
+          "name": "[PREP] Verify barber-level recurring flag auto-synced to true",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "const day = json.data.find(d => d.dayOfWeek == pm.collectionVariables.get('dayOfWeek'));",
+                  "pm.test('Tuesday has recurring_enabled', () => pm.expect(day.recurringEnabled).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{barberToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/schedule",
+              "host": ["{{baseUrl}}"],
+              "path": ["schedule"]
+            }
+          }
+        },
+        {
+          "name": "[PREP] Barber-level toggle: PATCH /barber/settings/recurring true",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('recurringEnabled = true', () => pm.expect(json.recurringEnabled).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{barberToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"enabled\": true\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/barber/settings/recurring",
+              "host": ["{{baseUrl}}"],
+              "path": ["barber", "settings", "recurring"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Client Discovery",
+      "item": [
+        {
+          "name": "[DISC] List recurring-eligible services",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('services array present', () => pm.expect(json.services).to.be.an('array'));",
+                  "pm.test('contains our serviceId', () => {",
+                  "  const sid = pm.collectionVariables.get('serviceId');",
+                  "  const match = json.services.find(s => s.id === sid);",
+                  "  pm.expect(match, 'service not found — service may not have recurringPriceUsd set').to.exist;",
+                  "  pm.expect(match.recurringPriceFrom).to.be.a('number');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/services/recurring",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "services", "recurring"]
+            }
+          }
+        },
+        {
+          "name": "[DISC] Get recurring slots for Tuesday",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('recurringAvailable = true', () => pm.expect(json.recurringAvailable).to.eql(true));",
+                  "pm.test('frequency options include weekly + biweekly', () => {",
+                  "  pm.expect(json.recurringFrequencyOptions).to.include.members(['weekly', 'biweekly']);",
+                  "});",
+                  "pm.test('price = service.recurring_price_usd (40) + extra_charge (15) = 55', () => pm.expect(json.recurringPriceUsd).to.eql(55));",
+                  "pm.test('slots is non-empty', () => pm.expect(json.slots.length).to.be.above(0));",
+                  "const slot = json.slots.find(s => s.time === pm.collectionVariables.get('slotTime'));",
+                  "pm.test(`slot ${pm.collectionVariables.get('slotTime')} is available`, () => {",
+                  "  pm.expect(slot, 'configured slotTime not in generated slots').to.exist;",
+                  "  pm.expect(slot.available).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/barbers/{{barberId}}/recurring-slots?serviceId={{serviceId}}&dayOfWeek={{dayOfWeek}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "barbers", "{{barberId}}", "recurring-slots"],
+              "query": [
+                { "key": "serviceId", "value": "{{serviceId}}" },
+                { "key": "dayOfWeek", "value": "{{dayOfWeek}}" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "[DISC] Get recurring slots for NON-recurring day (Monday, dayOfWeek=1) — recurringAvailable=false",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200 (no error)', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('recurringAvailable = false', () => pm.expect(json.recurringAvailable).to.eql(false));",
+                  "pm.test('price is null', () => pm.expect(json.recurringPriceUsd).to.be.null);",
+                  "pm.test('slots empty', () => pm.expect(json.slots).to.have.lengthOf(0));",
+                  "pm.test('frequency options empty', () => pm.expect(json.recurringFrequencyOptions).to.have.lengthOf(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/barbers/{{barberId}}/recurring-slots?serviceId={{serviceId}}&dayOfWeek=1",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "barbers", "{{barberId}}", "recurring-slots"],
+              "query": [
+                { "key": "serviceId", "value": "{{serviceId}}" },
+                { "key": "dayOfWeek", "value": "1" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Happy Path — Create + Accept",
+      "item": [
+        {
+          "name": "[HAPPY] Client creates recurring request (weekly)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json();",
+                  "pm.test('status = pending_barber_approval', () => pm.expect(json.recurringBooking.status).to.eql('pending_barber_approval'));",
+                  "pm.test('isRenewal = false', () => pm.expect(json.recurringBooking.isRenewal).to.eql(false));",
+                  "pm.test('frequency = weekly', () => pm.expect(json.recurringBooking.frequency).to.eql('weekly'));",
+                  "pm.test('priceUsd = 55', () => pm.expect(json.recurringBooking.priceUsd).to.eql(55));",
+                  "pm.collectionVariables.set('recurringId', json.recurringBooking.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"barberServiceId\": \"{{serviceId}}\",\n  \"dayOfWeek\": {{dayOfWeek}},\n  \"slotTime\": \"{{slotTime}}\",\n  \"frequency\": \"weekly\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings"]
+            }
+          }
+        },
+        {
+          "name": "[HAPPY] Barber sees pending offer in list",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "const id = pm.collectionVariables.get('recurringId');",
+                  "const match = json.recurringBookings.find(r => r.id === id);",
+                  "pm.test('pending offer appears', () => pm.expect(match).to.exist);",
+                  "pm.test('status = pending', () => pm.expect(match.status).to.eql('pending_barber_approval'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{barberToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barber/recurring-bookings?status=pending_barber_approval",
+              "host": ["{{baseUrl}}"],
+              "path": ["barber", "recurring-bookings"],
+              "query": [{ "key": "status", "value": "pending_barber_approval" }]
+            }
+          }
+        },
+        {
+          "name": "[HAPPY] Barber accepts offer (generates 60-day window)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('status = active', () => pm.expect(json.recurringBooking.status).to.eql('active'));",
+                  "pm.test('barberAcceptedAt set', () => pm.expect(json.recurringBooking.barberAcceptedAt).to.be.a('string'));",
+                  "pm.test('windowStartDate set', () => pm.expect(json.recurringBooking.windowStartDate).to.match(/\\d{4}-\\d{2}-\\d{2}/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{barberToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barber/recurring-bookings/{{recurringId}}/accept",
+              "host": ["{{baseUrl}}"],
+              "path": ["barber", "recurring-bookings", "{{recurringId}}", "accept"]
+            }
+          }
+        },
+        {
+          "name": "[HAPPY] Client sees recurring bookings in their bookings list (type=recurring)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('has at least 8 upcoming recurring occurrences', () => pm.expect(json.bookings.length).to.be.at.least(8));",
+                  "pm.test('all bookings marked isRecurring', () => pm.expect(json.bookings.every(b => b.isRecurring)).to.eql(true));",
+                  "pm.test('all link to our recurringId', () => {",
+                  "  const id = pm.collectionVariables.get('recurringId');",
+                  "  pm.expect(json.bookings.every(b => b.recurringBookingId === id)).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/bookings?timeframe=upcoming&type=recurring&limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "bookings"],
+              "query": [
+                { "key": "timeframe", "value": "upcoming" },
+                { "key": "type", "value": "recurring" },
+                { "key": "limit", "value": "50" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Detail & Occurrences",
+      "item": [
+        {
+          "name": "[DETAIL] Client fetches recurring booking detail",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "const rb = json.recurringBooking;",
+                  "pm.test('detail id matches', () => pm.expect(rb.id).to.eql(pm.collectionVariables.get('recurringId')));",
+                  "pm.test('upcomingOccurrences capped at 8', () => pm.expect(rb.upcomingOccurrences.length).to.be.at.most(8));",
+                  "pm.test('pastOccurrences array present', () => pm.expect(rb.pastOccurrences).to.be.an('array'));",
+                  "pm.test('each upcoming occurrence has bookingId', () => {",
+                  "  pm.expect(rb.upcomingOccurrences.every(o => typeof o.bookingId === 'string' && typeof o.scheduledAt === 'string')).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings/{{recurringId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings", "{{recurringId}}"]
+            }
+          }
+        },
+        {
+          "name": "[DETAIL] Barber fetches same recurring booking detail",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('detail id matches', () => pm.expect(json.recurringBooking.id).to.eql(pm.collectionVariables.get('recurringId')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{barberToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barber/recurring-bookings/{{recurringId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["barber", "recurring-bookings", "{{recurringId}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Pause / Resume / Cancel",
+      "item": [
+        {
+          "name": "[PAUSE] Client pauses from today+14 to today+28",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const d = new Date();",
+                  "const plus14 = new Date(d.getTime() + 14 * 86400000).toISOString().split('T')[0];",
+                  "const plus28 = new Date(d.getTime() + 28 * 86400000).toISOString().split('T')[0];",
+                  "pm.collectionVariables.set('pauseStart', plus14);",
+                  "pm.collectionVariables.set('pauseEnd', plus28);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('status = paused', () => pm.expect(json.recurringBooking.status).to.eql('paused'));",
+                  "pm.test('pauseStartDate matches', () => pm.expect(json.recurringBooking.pauseStartDate).to.eql(pm.collectionVariables.get('pauseStart')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pauseStartDate\": \"{{pauseStart}}\",\n  \"pauseEndDate\": \"{{pauseEnd}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings/{{recurringId}}/pause",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings", "{{recurringId}}", "pause"]
+            }
+          }
+        },
+        {
+          "name": "[PAUSE] Verify bookings in pause range were cancelled",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "const rb = json.recurringBooking;",
+                  "const pauseStart = pm.collectionVariables.get('pauseStart');",
+                  "const pauseEnd = pm.collectionVariables.get('pauseEnd');",
+                  "const within = rb.upcomingOccurrences.filter(o => {",
+                  "  const d = o.scheduledAt.split('T')[0];",
+                  "  return d >= pauseStart && d <= pauseEnd;",
+                  "});",
+                  "pm.test('no upcoming occurrences remain inside pause window', () => pm.expect(within).to.have.lengthOf(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings/{{recurringId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings", "{{recurringId}}"]
+            }
+          }
+        },
+        {
+          "name": "[RESUME] Client resumes recurring booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('status = active', () => pm.expect(json.recurringBooking.status).to.eql('active'));",
+                  "pm.test('pauseStartDate cleared', () => pm.expect(json.recurringBooking.pauseStartDate).to.be.null);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings/{{recurringId}}/resume",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings", "{{recurringId}}", "resume"]
+            }
+          }
+        },
+        {
+          "name": "[CANCEL] Client cancels recurring booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('status = cancelled', () => pm.expect(json.recurringBooking.status).to.eql('cancelled'));",
+                  "pm.test('cancelledBy = client', () => pm.expect(json.recurringBooking.cancelledBy).to.eql('client'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings/{{recurringId}}/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings", "{{recurringId}}", "cancel"]
+            }
+          }
+        },
+        {
+          "name": "[CANCEL] Verify future bookings were cancelled by system cascade",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('no upcoming recurring bookings remain', () => pm.expect(json.bookings).to.have.lengthOf(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/bookings?timeframe=upcoming&type=recurring&limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "bookings"],
+              "query": [
+                { "key": "timeframe", "value": "upcoming" },
+                { "key": "type", "value": "recurring" },
+                { "key": "limit", "value": "50" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Error Cases",
+      "item": [
+        {
+          "name": "[ERR] Create on non-recurring day (Monday) → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"barberServiceId\": \"{{serviceId}}\",\n  \"dayOfWeek\": 1,\n  \"slotTime\": \"09:00\",\n  \"frequency\": \"weekly\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings"]
+            }
+          }
+        },
+        {
+          "name": "[ERR] Barber accepts an already-cancelled offer → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{barberToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barber/recurring-bookings/{{recurringId}}/accept",
+              "host": ["{{baseUrl}}"],
+              "path": ["barber", "recurring-bookings", "{{recurringId}}", "accept"]
+            }
+          }
+        },
+        {
+          "name": "[ERR] Client hits barber-only endpoint → 403",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 403', () => pm.response.to.have.status(403));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barber/recurring-bookings/{{recurringId}}/accept",
+              "host": ["{{baseUrl}}"],
+              "path": ["barber", "recurring-bookings", "{{recurringId}}", "accept"]
+            }
+          }
+        },
+        {
+          "name": "[ERR] Unauthenticated request → 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings"]
+            }
+          }
+        },
+        {
+          "name": "[ERR] Cannot cancel an already-cancelled subscription → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings/{{recurringId}}/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings", "{{recurringId}}", "cancel"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "8. Renewal Flow (and rejecting wrong frequency)",
+      "item": [
+        {
+          "name": "[RENEW] Re-create a subscription to renew later (weekly)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('recurringId', json.recurringBooking.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"barberServiceId\": \"{{serviceId}}\",\n  \"dayOfWeek\": {{dayOfWeek}},\n  \"slotTime\": \"{{slotTime}}\",\n  \"frequency\": \"weekly\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings"]
+            }
+          }
+        },
+        {
+          "name": "[RENEW] Barber declines (with reason)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('status = cancelled', () => pm.expect(json.recurringBooking.status).to.eql('cancelled'));",
+                  "pm.test('declinedReason persisted', () => pm.expect(json.recurringBooking.declinedReason).to.eql('I am fully booked on Tuesdays'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{barberToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"I am fully booked on Tuesdays\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/barber/recurring-bookings/{{recurringId}}/decline",
+              "host": ["{{baseUrl}}"],
+              "path": ["barber", "recurring-bookings", "{{recurringId}}", "decline"]
+            }
+          }
+        },
+        {
+          "name": "[RENEW] Client cannot renew a declined subscription → 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings/{{recurringId}}/renew",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings", "{{recurringId}}", "renew"]
+            }
+          }
+        },
+        {
+          "name": "[RENEW] Create → Accept → Renew — happy renewal path",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('recurringId', json.recurringBooking.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"barberServiceId\": \"{{serviceId}}\",\n  \"dayOfWeek\": {{dayOfWeek}},\n  \"slotTime\": \"{{slotTime}}\",\n  \"frequency\": \"weekly\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings"]
+            }
+          }
+        },
+        {
+          "name": "[RENEW] Barber accepts — needed to allow renewal later",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('status = active', () => pm.expect(json.recurringBooking.status).to.eql('active'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{barberToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barber/recurring-bookings/{{recurringId}}/accept",
+              "host": ["{{baseUrl}}"],
+              "path": ["barber", "recurring-bookings", "{{recurringId}}", "accept"]
+            }
+          }
+        },
+        {
+          "name": "[RENEW] Client renews active subscription",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json();",
+                  "const rb = json.recurringBooking;",
+                  "pm.test('isRenewal = true', () => pm.expect(rb.isRenewal).to.eql(true));",
+                  "pm.test('originalRecurringBookingId set', () => pm.expect(rb.originalRecurringBookingId).to.eql(pm.collectionVariables.get('recurringId')));",
+                  "pm.test('status = pending_barber_approval', () => pm.expect(rb.status).to.eql('pending_barber_approval'));",
+                  "pm.collectionVariables.set('renewalId', rb.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings/{{recurringId}}/renew",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings", "{{recurringId}}", "renew"]
+            }
+          }
+        },
+        {
+          "name": "[RENEW] Second renew attempt while renewal pending → 409",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 409', () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings/{{recurringId}}/renew",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings", "{{recurringId}}", "renew"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

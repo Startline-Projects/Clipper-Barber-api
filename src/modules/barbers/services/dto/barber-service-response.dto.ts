@@ -10,6 +10,7 @@ export class BarberServiceDto {
   @ApiProperty() regularPriceUsd: number;
   @ApiPropertyOptional({ nullable: true }) afterHoursPriceUsd: number | null;
   @ApiPropertyOptional({ nullable: true }) dayOffPriceUsd: number | null;
+  @ApiPropertyOptional({ nullable: true }) recurringPriceUsd: number | null;
   @ApiProperty() isActive: boolean;
   @ApiProperty() sortOrder: number;
   @ApiProperty() createdAt: string;

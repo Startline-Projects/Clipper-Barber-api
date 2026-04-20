@@ -12,3 +12,4 @@ export class InvalidDayOffHours extends BadRequestException {}
 export class DayOffConflict extends BadRequestException {}
 export class InvalidSlotDuration extends BadRequestException {}
 export class InvalidAdvanceNotice extends BadRequestException {}
+export class InvalidRecurringConfig extends BadRequestException {}

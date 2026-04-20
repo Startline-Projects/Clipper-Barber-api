@@ -27,6 +27,7 @@ export class BarberBookingDetailDto {
   @ApiProperty({ nullable: true, type: Number }) noShowChargeAmountUsd: number | null;
   @ApiProperty() reviewLeftByClient: boolean;
   @ApiProperty() isRecurring: boolean;
+  @ApiProperty({ nullable: true, type: String }) recurringBookingId: string | null;
   @ApiProperty() createdAt: string;
 }
 

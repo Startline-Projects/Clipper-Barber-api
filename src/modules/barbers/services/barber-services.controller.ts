@@ -22,6 +22,7 @@ import {
   BarberServiceResponseDto,
   BarberServicesListResponseDto,
 } from './dto/barber-service-response.dto';
+import { ClientRecurringServicesResponseDto } from './dto/client-recurring-services.dto';
 
 @ApiTags('Barber Services')
 @ApiBearerAuth()
@@ -43,6 +44,23 @@ export class BarberServicesController {
     await this.barberServicesService.resolveAndVerifyOwnership(user.sub, barberId);
     const data = await this.barberServicesService.create(barberId, dto);
     return { success: true, data };
+  }
+
+  @Get('recurring')
+  @Roles('client')
+  @ApiOperation({
+    summary:
+      "Client-facing list of the barber's services that support recurring bookings, with the lowest total recurring price across recurring-enabled days.",
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Recurring-eligible services returned',
+    type: ClientRecurringServicesResponseDto,
+  })
+  public async listRecurringServicesForClient(
+    @Param('barberId', ParseUUIDPipe) barberId: string,
+  ): Promise<ClientRecurringServicesResponseDto> {
+    return this.barberServicesService.findRecurringServicesForClient(barberId);
   }
 
   @Get()

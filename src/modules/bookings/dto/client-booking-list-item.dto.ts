@@ -25,7 +25,8 @@ export class ClientBookingListItemDto {
   @ApiProperty({ nullable: true, enum: ['client', 'barber'] }) cancelledBy: 'client' | 'barber' | null;
   @ApiProperty() noShowCharged: boolean;
   @ApiProperty({ nullable: true, type: Number }) noShowChargeAmountUsd: number | null;
-  // TODO: surface isRecurring once recurring bookings ship end-to-end on the client side.
+  @ApiProperty() isRecurring: boolean;
+  @ApiProperty({ nullable: true, type: String }) recurringBookingId: string | null;
 }
 
 export class ClientBookingsListResponseDto {
