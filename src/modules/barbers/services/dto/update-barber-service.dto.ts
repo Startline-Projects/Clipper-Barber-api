@@ -48,6 +48,16 @@ export class UpdateBarberServiceDto {
   @Min(0)
   dayOffPriceUsd?: number | null;
 
+  @ApiPropertyOptional({
+    nullable: true,
+    example: 40.0,
+    description: 'Per-occurrence recurring price. Pass null to disable recurring for this service.',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  recurringPriceUsd?: number | null;
+
   @ApiPropertyOptional({ example: 2, description: 'Display sort order' })
   @IsOptional()
   @IsInt()

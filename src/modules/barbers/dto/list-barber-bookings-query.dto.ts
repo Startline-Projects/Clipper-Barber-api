@@ -16,6 +16,11 @@ export enum BookingStatusDto {
   NO_SHOW = 'no_show',
 }
 
+export enum BookingTypeFilterDto {
+  ONE_OFF = 'one_off',
+  RECURRING = 'recurring',
+}
+
 export class ListBarberBookingsQueryDto {
   @ApiProperty({ enum: BookingTimeframeDto, example: BookingTimeframeDto.UPCOMING })
   @IsEnum(BookingTimeframeDto)
@@ -30,6 +35,14 @@ export class ListBarberBookingsQueryDto {
   @IsOptional()
   @IsEnum(BookingStatusDto)
   status?: BookingStatusDto;
+
+  @ApiPropertyOptional({
+    enum: BookingTypeFilterDto,
+    description: 'one_off = non-recurring only; recurring = only bookings generated from a recurring subscription',
+  })
+  @IsOptional()
+  @IsEnum(BookingTypeFilterDto)
+  type?: BookingTypeFilterDto;
 
   @ApiPropertyOptional({ format: 'uuid', description: 'ID of the last booking from the previous page' })
   @IsOptional()

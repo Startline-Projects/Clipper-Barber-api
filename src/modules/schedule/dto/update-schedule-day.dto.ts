@@ -1,5 +1,11 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsIn, IsInt, IsOptional, Matches, Min } from 'class-validator';
+import { IsBoolean, IsEnum, IsIn, IsInt, IsNumber, IsOptional, Matches, Min } from 'class-validator';
+
+export enum RecurringFrequencyOption {
+  WEEKLY = 'weekly',
+  BIWEEKLY = 'biweekly',
+  BOTH = 'both',
+}
 
 const TIME_REGEX = /^([01]\d|2[0-3]):[0-5]\d$/;
 const TIME_EXAMPLE = '09:00';
@@ -61,4 +67,28 @@ export class UpdateScheduleDayDto {
   @IsInt()
   @Min(0, { message: 'advanceNoticeMinutes must be >= 0' })
   advanceNoticeMinutes?: number;
+
+  @ApiPropertyOptional({ description: 'Whether this day is available for recurring bookings' })
+  @IsOptional()
+  @IsBoolean()
+  recurringEnabled?: boolean;
+
+  @ApiPropertyOptional({
+    enum: RecurringFrequencyOption,
+    description: 'Allowed recurring frequency on this day; required when recurringEnabled is true',
+  })
+  @IsOptional()
+  @IsEnum(RecurringFrequencyOption, {
+    message: 'recurringFrequency must be one of weekly, biweekly, both',
+  })
+  recurringFrequency?: RecurringFrequencyOption;
+
+  @ApiPropertyOptional({
+    example: 10.0,
+    description: 'Optional flat surcharge added on top of service.recurringPriceUsd for this day',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0, { message: 'recurringExtraChargeUsd must be >= 0' })
+  recurringExtraChargeUsd?: number;
 }

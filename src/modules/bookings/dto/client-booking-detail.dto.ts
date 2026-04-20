@@ -34,7 +34,8 @@ export class ClientBookingDetailDto {
   @ApiProperty({ type: ClientBookingDetailPricingDto }) pricing: ClientBookingDetailPricingDto;
   @ApiProperty({ nullable: true, type: String }) confirmedAt: string | null;
   @ApiProperty({ nullable: true, type: ClientBookingReviewDto }) review: ClientBookingReviewDto | null;
-  // TODO: surface isRecurring once recurring bookings ship end-to-end on the client side.
+  @ApiProperty() isRecurring: boolean;
+  @ApiProperty({ nullable: true, type: String }) recurringBookingId: string | null;
 }
 
 export class ClientBookingDetailResponseDto {

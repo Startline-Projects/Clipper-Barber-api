@@ -17,6 +17,7 @@ import { ListClientBookingsQueryDto } from './dto/list-client-bookings-query.dto
 import {
   BookingStatusDto,
   BookingTimeframeDto,
+  BookingTypeFilterDto,
 } from '../barbers/dto/list-barber-bookings-query.dto';
 import {
   ClientBookingListItemDto,
@@ -35,7 +36,8 @@ const CLIENT_LIST_SELECT = `
   id, scheduled_at, booking_type, price_usd, status,
   duration_minutes, barber_id, barber_service_id,
   cancelled_at, cancelled_by,
-  no_show_charged, no_show_charge_amount_usd
+  no_show_charged, no_show_charge_amount_usd,
+  recurring_booking_id
 `;
 
 const CLIENT_DETAIL_SELECT = `
@@ -43,7 +45,8 @@ const CLIENT_DETAIL_SELECT = `
   duration_minutes, barber_id, barber_service_id,
   base_price_usd, slot_type_surcharge_usd, price_usd,
   confirmed_at, cancelled_at, cancelled_by,
-  no_show_charged, no_show_charge_amount_usd
+  no_show_charged, no_show_charge_amount_usd,
+  recurring_booking_id
 `;
 
 interface ClientBookingListRow {
@@ -59,6 +62,7 @@ interface ClientBookingListRow {
   cancelled_by: string | null;
   no_show_charged: boolean;
   no_show_charge_amount_usd: string | number | null;
+  recurring_booking_id: string | null;
 }
 
 interface ClientBookingDetailRow {
@@ -77,6 +81,7 @@ interface ClientBookingDetailRow {
   cancelled_by: string | null;
   no_show_charged: boolean;
   no_show_charge_amount_usd: string | number | null;
+  recurring_booking_id: string | null;
 }
 
 interface BarberLite {
@@ -169,6 +174,12 @@ export class BookingsService {
       q = q.or(`status.in.(completed,cancelled,no_show),scheduled_at.lt.${nowIso}`);
     }
 
+    if (query.type === BookingTypeFilterDto.ONE_OFF) {
+      q = q.is('recurring_booking_id', null);
+    } else if (query.type === BookingTypeFilterDto.RECURRING) {
+      q = q.not('recurring_booking_id', 'is', null);
+    }
+
     if (cursorRow) {
       if (ascending) {
         q = q.or(
@@ -224,6 +235,8 @@ export class BookingsService {
           r.no_show_charge_amount_usd !== null && r.no_show_charge_amount_usd !== undefined
             ? Number(r.no_show_charge_amount_usd)
             : null,
+        isRecurring: r.recurring_booking_id !== null,
+        recurringBookingId: r.recurring_booking_id,
       };
     });
 
@@ -312,6 +325,8 @@ export class BookingsService {
       pricing: { basePrice, additionalCost, totalPrice },
       confirmedAt: row.confirmed_at ? new Date(row.confirmed_at).toISOString() : null,
       review,
+      isRecurring: row.recurring_booking_id !== null,
+      recurringBookingId: row.recurring_booking_id,
     };
 
     return { booking };

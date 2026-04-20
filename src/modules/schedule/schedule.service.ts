@@ -1,6 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, InternalServerErrorException } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
-import { UpdateScheduleDayDto } from './dto/update-schedule-day.dto';
+import {
+  RecurringFrequencyOption,
+  UpdateScheduleDayDto,
+} from './dto/update-schedule-day.dto';
 import { ScheduleDayDto } from './dto/schedule-day-response.dto';
 import {
   DayOffConflict,
@@ -8,6 +11,7 @@ import {
   InvalidAdvanceNotice,
   InvalidAfterHours,
   InvalidDayOffHours,
+  InvalidRecurringConfig,
   InvalidRegularHours,
   InvalidSlotDuration,
   ScheduleNotFound,
@@ -28,6 +32,9 @@ interface RawScheduleDay {
   day_off_start_time: string | null;
   day_off_end_time: string | null;
   advance_notice_minutes: number;
+  recurring_enabled: boolean;
+  recurring_frequency: RecurringFrequencyOption | null;
+  recurring_extra_charge_usd: string | number | null;
   created_at: string;
   updated_at: string;
 }
@@ -64,6 +71,12 @@ export class ScheduleService {
       dayOffStartTime: this.trimTime(row.day_off_start_time),
       dayOffEndTime: this.trimTime(row.day_off_end_time),
       advanceNoticeMinutes: row.advance_notice_minutes,
+      recurringEnabled: row.recurring_enabled,
+      recurringFrequency: row.recurring_frequency,
+      recurringExtraChargeUsd:
+        row.recurring_extra_charge_usd !== null && row.recurring_extra_charge_usd !== undefined
+          ? Number(row.recurring_extra_charge_usd)
+          : null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -152,6 +165,21 @@ export class ScheduleService {
         throw new InvalidDayOffHours('dayOffStartTime must be before dayOffEndTime');
       }
     }
+
+    // Recurring: frequency is mandatory when enabled; both only if the day
+    // actually has a slot window (working hours or day-off bookings).
+    if (row.recurring_enabled) {
+      if (!row.recurring_frequency) {
+        throw new InvalidRecurringConfig(
+          'recurringFrequency is required when recurringEnabled is true',
+        );
+      }
+      if (!row.is_working && !row.day_off_booking_enabled) {
+        throw new InvalidRecurringConfig(
+          'Recurring bookings require either regular hours or day-off bookings to be enabled for this day',
+        );
+      }
+    }
   }
 
   public async getSchedule(authUserId: string): Promise<ScheduleDayDto[]> {
@@ -219,6 +247,12 @@ export class ScheduleService {
         dto.advanceNoticeMinutes !== undefined
           ? dto.advanceNoticeMinutes
           : row.advance_notice_minutes,
+      recurring_enabled:
+        dto.recurringEnabled !== undefined ? dto.recurringEnabled : row.recurring_enabled,
+      // Disabling recurring clears the frequency and extra charge; otherwise
+      // we honour whatever the caller sent (or keep the existing value).
+      recurring_frequency: this.resolveRecurringFrequency(dto, row),
+      recurring_extra_charge_usd: this.resolveRecurringExtraCharge(dto, row),
       created_at: row.created_at,
       updated_at: row.updated_at,
     };
@@ -239,6 +273,9 @@ export class ScheduleService {
         day_off_start_time: merged.day_off_start_time,
         day_off_end_time: merged.day_off_end_time,
         advance_notice_minutes: merged.advance_notice_minutes,
+        recurring_enabled: merged.recurring_enabled,
+        recurring_frequency: merged.recurring_frequency,
+        recurring_extra_charge_usd: merged.recurring_extra_charge_usd,
         updated_at: new Date().toISOString(),
       })
       .eq('barber_id', barberId)
@@ -248,6 +285,59 @@ export class ScheduleService {
 
     if (updateError) throw updateError;
 
+    // Keep the barber-level flag in sync: true iff any schedule day has
+    // recurring_enabled = true. Barber can still manually toggle this via
+    // PATCH /barber/settings/recurring (R3); the manual toggle overrides
+    // until the next schedule save.
+    await this.syncBarberRecurringFlag(barberId);
+
     return this.mapRow(updated as RawScheduleDay);
+  }
+
+  private resolveRecurringFrequency(
+    dto: UpdateScheduleDayDto,
+    row: RawScheduleDay,
+  ): RecurringFrequencyOption | null {
+    const enabled =
+      dto.recurringEnabled !== undefined ? dto.recurringEnabled : row.recurring_enabled;
+
+    if (!enabled) return null;
+
+    if (dto.recurringFrequency !== undefined) return dto.recurringFrequency;
+    return row.recurring_frequency;
+  }
+
+  private resolveRecurringExtraCharge(
+    dto: UpdateScheduleDayDto,
+    row: RawScheduleDay,
+  ): number | null {
+    const enabled =
+      dto.recurringEnabled !== undefined ? dto.recurringEnabled : row.recurring_enabled;
+
+    if (!enabled) return null;
+
+    if (dto.recurringExtraChargeUsd !== undefined) return dto.recurringExtraChargeUsd;
+    return row.recurring_extra_charge_usd !== null && row.recurring_extra_charge_usd !== undefined
+      ? Number(row.recurring_extra_charge_usd)
+      : null;
+  }
+
+  private async syncBarberRecurringFlag(barberId: string): Promise<void> {
+    const { count, error: countError } = await this.db
+      .from('barber_schedules')
+      .select('id', { head: true, count: 'exact' })
+      .eq('barber_id', barberId)
+      .eq('recurring_enabled', true);
+
+    if (countError) throw new InternalServerErrorException('Failed to sync recurring flag');
+
+    const anyRecurring = (count ?? 0) > 0;
+
+    const { error: updateError } = await this.db
+      .from('barbers')
+      .update({ recurring_enabled: anyRecurring })
+      .eq('user_id', barberId);
+
+    if (updateError) throw new InternalServerErrorException('Failed to sync recurring flag');
   }
 }
