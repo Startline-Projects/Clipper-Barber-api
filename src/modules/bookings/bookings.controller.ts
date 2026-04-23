@@ -16,9 +16,12 @@ import { PreviewBookingDto } from './dto/preview-booking.dto';
 import { PreviewBookingResponseDto } from './dto/preview-booking-response.dto';
 import { ConfirmBookingResponseDto } from './dto/confirm-booking-response.dto';
 import { CancelBookingResponseDto } from './dto/cancel-booking-response.dto';
-import { ListClientBookingsQueryDto } from './dto/list-client-bookings-query.dto';
-import { ClientBookingsListResponseDto } from './dto/client-booking-list-item.dto';
+import { ClientBookingsPageQueryDto } from './dto/client-bookings-page-query.dto';
+import { ClientUpcomingBookingsResponseDto } from './dto/client-upcoming-booking.dto';
+import { ClientPastBookingsResponseDto } from './dto/client-past-booking.dto';
 import { ClientBookingDetailResponseDto } from './dto/client-booking-detail.dto';
+import { ClientRecurringBookingsListResponseDto } from './recurring/dto/client-recurring-booking-list.dto';
+import { RecurringBookingsService } from './recurring/recurring.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -72,20 +75,47 @@ export class BookingsController {
 @Roles('client')
 @Controller('client/bookings')
 export class ClientBookingsController {
-  constructor(private readonly bookingsService: BookingsService) {}
+  constructor(
+    private readonly bookingsService: BookingsService,
+    private readonly recurringService: RecurringBookingsService,
+  ) {}
 
-  @Get()
-  @ApiOperation({ summary: 'List the authenticated client’s bookings (upcoming/past) with cursor pagination' })
-  @ApiResponse({
-    status: 200,
-    description: 'Bookings returned successfully',
-    type: ClientBookingsListResponseDto,
+  @Get('upcoming')
+  @ApiOperation({
+    summary:
+      "List the authenticated client's upcoming bookings. Recurring subscriptions collapse to their next occurrence only.",
   })
-  public async listBookings(
+  @ApiResponse({ status: 200, type: ClientUpcomingBookingsResponseDto })
+  public async listUpcomingBookings(
     @CurrentUser() user: SupabaseUserPayload,
-    @Query() query: ListClientBookingsQueryDto
-  ): Promise<ClientBookingsListResponseDto> {
-    return this.bookingsService.listClientBookings(user.sub, query);
+    @Query() query: ClientBookingsPageQueryDto,
+  ): Promise<ClientUpcomingBookingsResponseDto> {
+    return this.bookingsService.listClientUpcomingBookings(user.sub, query);
+  }
+
+  @Get('past')
+  @ApiOperation({
+    summary: "List the authenticated client's completed bookings with review flag.",
+  })
+  @ApiResponse({ status: 200, type: ClientPastBookingsResponseDto })
+  public async listPastBookings(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Query() query: ClientBookingsPageQueryDto,
+  ): Promise<ClientPastBookingsResponseDto> {
+    return this.bookingsService.listClientPastBookings(user.sub, query);
+  }
+
+  @Get('recurring')
+  @ApiOperation({
+    summary:
+      "List the authenticated client's recurring subscriptions with status and remaining-appointments count.",
+  })
+  @ApiResponse({ status: 200, type: ClientRecurringBookingsListResponseDto })
+  public async listRecurringBookings(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Query() query: ClientBookingsPageQueryDto,
+  ): Promise<ClientRecurringBookingsListResponseDto> {
+    return this.recurringService.listClientRecurringForClient(user.sub, query);
   }
 
   @Get(':id')

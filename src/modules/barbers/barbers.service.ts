@@ -6,6 +6,8 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { BookingCompletionService } from '../bookings/booking-completion.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationTypeDto } from '../notifications/dto/notification.dto';
 import { BookingTypeDto } from '../bookings/dto/preview-booking.dto';
 import {
   BookingStatusDto,
@@ -96,7 +98,8 @@ interface ServiceLite {
 export class BarbersService {
   constructor(
     private readonly supabaseService: SupabaseService,
-    private readonly completionService: BookingCompletionService
+    private readonly completionService: BookingCompletionService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   private get db() {
@@ -289,12 +292,20 @@ export class BarbersService {
       .eq('id', bookingId)
       .eq('barber_id', barberId)
       .eq('status', 'pending')
-      .select('id, status, confirmed_at')
+      .select('id, status, confirmed_at, client_id')
       .single();
 
     if (updateError || !updated) {
       throw new InternalServerErrorException('Failed to confirm booking');
     }
+
+    void this.notificationsService.createAndSendNotification({
+      recipientId: updated.client_id as string,
+      recipientType: 'client',
+      senderId: barberId,
+      type: NotificationTypeDto.BOOKING_CONFIRMED,
+      bookingId: updated.id as string,
+    });
 
     return {
       booking: {
@@ -327,12 +338,20 @@ export class BarbersService {
       .eq('id', bookingId)
       .eq('barber_id', barberId)
       .in('status', ['pending', 'confirmed'])
-      .select('id, status, cancelled_at, cancelled_by')
+      .select('id, status, cancelled_at, cancelled_by, client_id')
       .single();
 
     if (updateError || !updated) {
       throw new InternalServerErrorException('Failed to cancel booking');
     }
+
+    void this.notificationsService.createAndSendNotification({
+      recipientId: updated.client_id as string,
+      recipientType: 'client',
+      senderId: barberId,
+      type: NotificationTypeDto.BOOKING_CANCELLED,
+      bookingId: updated.id as string,
+    });
 
     return {
       booking: {

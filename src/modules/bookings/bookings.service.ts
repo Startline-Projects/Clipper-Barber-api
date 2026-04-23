@@ -6,6 +6,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationTypeDto } from '../notifications/dto/notification.dto';
 import { BookingTypeDto, PreviewBookingDto } from './dto/preview-booking.dto';
 import { BookingPreviewDto, PreviewBookingResponseDto } from './dto/preview-booking-response.dto';
 import { ConfirmBookingResponseDto, ConfirmedBookingDto } from './dto/confirm-booking-response.dto';
@@ -13,32 +15,25 @@ import {
   CancelBookingResponseDto,
   CancelledBookingDto,
 } from './dto/cancel-booking-response.dto';
-import { ListClientBookingsQueryDto } from './dto/list-client-bookings-query.dto';
-import {
-  BookingStatusDto,
-  BookingTimeframeDto,
-  BookingTypeFilterDto,
-} from '../barbers/dto/list-barber-bookings-query.dto';
-import {
-  ClientBookingListItemDto,
-  ClientBookingsListResponseDto,
-} from './dto/client-booking-list-item.dto';
+import { BookingStatusDto } from '../barbers/dto/list-barber-bookings-query.dto';
 import {
   ClientBookingDetailDto,
   ClientBookingDetailResponseDto,
   ClientBookingReviewDto,
 } from './dto/client-booking-detail.dto';
+import { ClientBookingsPageQueryDto } from './dto/client-bookings-page-query.dto';
+import {
+  ClientUpcomingBookingDto,
+  ClientUpcomingBookingsResponseDto,
+} from './dto/client-upcoming-booking.dto';
+import {
+  ClientPastBookingDto,
+  ClientPastBookingsResponseDto,
+} from './dto/client-past-booking.dto';
 
-const DEFAULT_PAGE_SIZE = 20;
-const MAX_PAGE_SIZE = 50;
-
-const CLIENT_LIST_SELECT = `
-  id, scheduled_at, booking_type, price_usd, status,
-  duration_minutes, barber_id, barber_service_id,
-  cancelled_at, cancelled_by,
-  no_show_charged, no_show_charge_amount_usd,
-  recurring_booking_id
-`;
+const DEFAULT_PAGE = 1;
+const DEFAULT_LIMIT = 10;
+const MAX_LIMIT = 50;
 
 const CLIENT_DETAIL_SELECT = `
   id, scheduled_at, booking_type, status,
@@ -48,22 +43,6 @@ const CLIENT_DETAIL_SELECT = `
   no_show_charged, no_show_charge_amount_usd,
   recurring_booking_id
 `;
-
-interface ClientBookingListRow {
-  id: string;
-  scheduled_at: string;
-  booking_type: string;
-  price_usd: string | number;
-  status: string;
-  duration_minutes: number | null;
-  barber_id: string;
-  barber_service_id: string | null;
-  cancelled_at: string | null;
-  cancelled_by: string | null;
-  no_show_charged: boolean;
-  no_show_charge_amount_usd: string | number | null;
-  recurring_booking_id: string | null;
-}
 
 interface ClientBookingDetailRow {
   id: string;
@@ -146,105 +125,261 @@ interface ValidatedSlotContext {
 
 @Injectable()
 export class BookingsService {
-  constructor(private readonly supabaseService: SupabaseService) {}
+  constructor(
+    private readonly supabaseService: SupabaseService,
+    private readonly notificationsService: NotificationsService,
+  ) {}
 
   private get db() {
     return this.supabaseService.getClient();
   }
 
   // ────────────────────────────────────────────────────────────
-  // Client bookings — list / detail
+  // Client bookings — upcoming / past (page-based)
   // ────────────────────────────────────────────────────────────
 
-  public async listClientBookings(
+  public async listClientUpcomingBookings(
     clientId: string,
-    query: ListClientBookingsQueryDto
-  ): Promise<ClientBookingsListResponseDto> {
-    const limit = Math.min(query.limit ?? DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
+    query: ClientBookingsPageQueryDto,
+  ): Promise<ClientUpcomingBookingsResponseDto> {
+    const page = query.page ?? DEFAULT_PAGE;
+    const limit = Math.min(query.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
     const nowIso = new Date().toISOString();
-    const ascending = query.timeframe === BookingTimeframeDto.UPCOMING;
 
-    const cursorRow = await this.resolveClientCursor(clientId, query.cursor);
+    // Fetch all upcoming ids to dedupe recurring (keep earliest per recurring_booking_id)
+    const { data: idRows, error: idErr } = await this.db
+      .from('bookings')
+      .select('id, scheduled_at, recurring_booking_id')
+      .eq('client_id', clientId)
+      .in('status', ['pending', 'confirmed'])
+      .gte('scheduled_at', nowIso)
+      .order('scheduled_at', { ascending: true })
+      .order('id', { ascending: true });
 
-    let q = this.db.from('bookings').select(CLIENT_LIST_SELECT).eq('client_id', clientId);
+    if (idErr) throw new InternalServerErrorException('Failed to fetch bookings');
 
-    if (query.timeframe === BookingTimeframeDto.UPCOMING) {
-      q = q.in('status', ['pending', 'confirmed']).gte('scheduled_at', nowIso);
-    } else {
-      q = q.or(`status.in.(completed,cancelled,no_show),scheduled_at.lt.${nowIso}`);
-    }
-
-    if (query.type === BookingTypeFilterDto.ONE_OFF) {
-      q = q.is('recurring_booking_id', null);
-    } else if (query.type === BookingTypeFilterDto.RECURRING) {
-      q = q.not('recurring_booking_id', 'is', null);
-    }
-
-    if (cursorRow) {
-      if (ascending) {
-        q = q.or(
-          `scheduled_at.gt.${cursorRow.scheduled_at},and(scheduled_at.eq.${cursorRow.scheduled_at},id.gt.${cursorRow.id})`
-        );
-      } else {
-        q = q.or(
-          `scheduled_at.lt.${cursorRow.scheduled_at},and(scheduled_at.eq.${cursorRow.scheduled_at},id.lt.${cursorRow.id})`
-        );
-      }
-    }
-
-    q = q
-      .order('scheduled_at', { ascending })
-      .order('id', { ascending })
-      .limit(limit + 1);
-
-    const { data, error } = await q;
-    if (error) throw new InternalServerErrorException('Failed to fetch bookings');
-
-    const rows = (data ?? []) as ClientBookingListRow[];
-    const hasMore = rows.length > limit;
-    const pageRows = hasMore ? rows.slice(0, limit) : rows;
-
-    const { barberMap, serviceMap } = await this.loadClientBookingRelated(
-      pageRows.map((r) => r.barber_id),
-      pageRows.map((r) => r.barber_service_id).filter((id): id is string => !!id)
+    const deduped = this.dedupRecurringUpcoming(
+      (idRows ?? []) as { id: string; scheduled_at: string; recurring_booking_id: string | null }[],
     );
 
-    const bookings: ClientBookingListItemDto[] = pageRows.map((r) => {
+    const totalBookings = deduped.length;
+    const totalPages = Math.max(1, Math.ceil(totalBookings / limit));
+    const startIndex = (page - 1) * limit;
+    const pageIds = deduped.slice(startIndex, startIndex + limit).map((r) => r.id);
+
+    const bookings = await this.hydrateUpcomingBookings(pageIds);
+
+    return {
+      bookings,
+      pagination: {
+        currentPage: page,
+        totalPages,
+        totalBookings,
+        limit,
+        hasNextPage: page < totalPages,
+      },
+    };
+  }
+
+  public async listClientPastBookings(
+    clientId: string,
+    query: ClientBookingsPageQueryDto,
+  ): Promise<ClientPastBookingsResponseDto> {
+    const page = query.page ?? DEFAULT_PAGE;
+    const limit = Math.min(query.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
+    const nowIso = new Date().toISOString();
+
+    const { count, error: countErr } = await this.db
+      .from('bookings')
+      .select('id', { head: true, count: 'exact' })
+      .eq('client_id', clientId)
+      .lt('scheduled_at', nowIso);
+
+    if (countErr) throw new InternalServerErrorException('Failed to count past bookings');
+
+    const totalBookings = count ?? 0;
+    const totalPages = Math.max(1, Math.ceil(totalBookings / limit));
+    const startIndex = (page - 1) * limit;
+
+    const { data, error } = await this.db
+      .from('bookings')
+      .select(
+        'id, scheduled_at, price_usd, status, barber_id, barber_service_id, duration_minutes',
+      )
+      .eq('client_id', clientId)
+      .lt('scheduled_at', nowIso)
+      .order('scheduled_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(startIndex, startIndex + limit - 1);
+
+    if (error) throw new InternalServerErrorException('Failed to fetch past bookings');
+
+    const rows = (data ?? []) as {
+      id: string;
+      scheduled_at: string;
+      price_usd: string | number;
+      status: string;
+      barber_id: string;
+      barber_service_id: string | null;
+      duration_minutes: number | null;
+    }[];
+
+    const [{ barberMap, serviceMap }, reviewedIds, timezoneMap] = await Promise.all([
+      this.loadClientBookingRelated(
+        rows.map((r) => r.barber_id),
+        rows.map((r) => r.barber_service_id).filter((id): id is string => !!id),
+      ),
+      this.fetchReviewedBookingIds(rows.map((r) => r.id)),
+      this.fetchBarberTimezones(rows.map((r) => r.barber_id)),
+    ]);
+
+    const bookings: ClientPastBookingDto[] = rows.map((r) => {
       const barber = barberMap.get(r.barber_id);
       const service = r.barber_service_id ? serviceMap.get(r.barber_service_id) : undefined;
-      const isCancelled = r.status === 'cancelled';
+      const tz = timezoneMap.get(r.barber_id) ?? 'UTC';
+      const local = this.splitLocalDateTime(r.scheduled_at, tz);
       return {
         id: r.id,
-        barber: {
-          id: r.barber_id,
-          name: barber?.full_name ?? 'Unknown',
-          profilePhotoUrl: barber?.profile_photo_url ?? null,
-        },
-        service: {
-          name: service?.name ?? 'Service',
-          durationMinutes: service?.duration_minutes ?? r.duration_minutes ?? 0,
-        },
-        scheduledAt: new Date(r.scheduled_at).toISOString(),
-        bookingType: r.booking_type as BookingTypeDto,
-        totalPrice: Number(r.price_usd),
-        status: r.status as BookingStatusDto,
-        cancelledAt: isCancelled && r.cancelled_at ? new Date(r.cancelled_at).toISOString() : null,
-        cancelledBy: isCancelled ? ((r.cancelled_by as 'client' | 'barber' | null) ?? null) : null,
-        noShowCharged: r.no_show_charged,
-        noShowChargeAmountUsd:
-          r.no_show_charge_amount_usd !== null && r.no_show_charge_amount_usd !== undefined
-            ? Number(r.no_show_charge_amount_usd)
-            : null,
-        isRecurring: r.recurring_booking_id !== null,
-        recurringBookingId: r.recurring_booking_id,
+        barberName: barber?.full_name ?? 'Unknown',
+        barberProfileImage: barber?.profile_photo_url ?? null,
+        serviceName: service?.name ?? 'Service',
+        appointmentDate: local.date,
+        appointmentTime: local.time,
+        pricePaid: Number(r.price_usd),
+        hasReview: reviewedIds.has(r.id),
       };
     });
 
     return {
       bookings,
-      nextCursor: hasMore && pageRows.length > 0 ? pageRows[pageRows.length - 1].id : null,
-      hasMore,
+      pagination: {
+        currentPage: page,
+        totalPages,
+        totalBookings,
+        limit,
+        hasNextPage: page < totalPages,
+      },
     };
+  }
+
+  private dedupRecurringUpcoming(
+    rows: { id: string; scheduled_at: string; recurring_booking_id: string | null }[],
+  ): { id: string; scheduled_at: string }[] {
+    const seenRecurring = new Set<string>();
+    const result: { id: string; scheduled_at: string }[] = [];
+    for (const r of rows) {
+      if (r.recurring_booking_id) {
+        if (seenRecurring.has(r.recurring_booking_id)) continue;
+        seenRecurring.add(r.recurring_booking_id);
+      }
+      result.push({ id: r.id, scheduled_at: r.scheduled_at });
+    }
+    return result;
+  }
+
+  private async hydrateUpcomingBookings(ids: string[]): Promise<ClientUpcomingBookingDto[]> {
+    if (ids.length === 0) return [];
+
+    const { data, error } = await this.db
+      .from('bookings')
+      .select(
+        'id, scheduled_at, status, barber_id, barber_service_id, duration_minutes, recurring_booking_id',
+      )
+      .in('id', ids);
+
+    if (error) throw new InternalServerErrorException('Failed to fetch bookings');
+
+    const rows = (data ?? []) as {
+      id: string;
+      scheduled_at: string;
+      status: string;
+      barber_id: string;
+      barber_service_id: string | null;
+      duration_minutes: number | null;
+      recurring_booking_id: string | null;
+    }[];
+
+    // Preserve the order of `ids` (which was pre-sorted ascending by date)
+    const orderIndex = new Map<string, number>();
+    ids.forEach((id, i) => orderIndex.set(id, i));
+    rows.sort((a, b) => (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0));
+
+    const [{ barberMap, serviceMap }, timezoneMap] = await Promise.all([
+      this.loadClientBookingRelated(
+        rows.map((r) => r.barber_id),
+        rows.map((r) => r.barber_service_id).filter((id): id is string => !!id),
+      ),
+      this.fetchBarberTimezones(rows.map((r) => r.barber_id)),
+    ]);
+
+    return rows.map((r) => {
+      const barber = barberMap.get(r.barber_id);
+      const service = r.barber_service_id ? serviceMap.get(r.barber_service_id) : undefined;
+      const tz = timezoneMap.get(r.barber_id) ?? 'UTC';
+      const local = this.splitLocalDateTime(r.scheduled_at, tz);
+      return {
+        id: r.id,
+        barberName: barber?.full_name ?? 'Unknown',
+        barberProfileImage: barber?.profile_photo_url ?? null,
+        serviceName: service?.name ?? 'Service',
+        appointmentDate: local.date,
+        appointmentTime: local.time,
+        durationMinutes: service?.duration_minutes ?? r.duration_minutes ?? 0,
+        status: r.status as BookingStatusDto,
+        isRecurring: r.recurring_booking_id !== null,
+      };
+    });
+  }
+
+  private async fetchReviewedBookingIds(bookingIds: string[]): Promise<Set<string>> {
+    const reviewed = new Set<string>();
+    if (bookingIds.length === 0) return reviewed;
+
+    const { data, error } = await this.db
+      .from('reviews')
+      .select('booking_id')
+      .in('booking_id', bookingIds);
+
+    if (error) throw new InternalServerErrorException('Failed to fetch reviews');
+    for (const row of data ?? []) reviewed.add(row.booking_id as string);
+    return reviewed;
+  }
+
+  private async fetchBarberTimezones(barberIds: string[]): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    const uniqueIds = Array.from(new Set(barberIds));
+    if (uniqueIds.length === 0) return result;
+
+    const { data, error } = await this.db
+      .from('barbers')
+      .select('user_id, timezone')
+      .in('user_id', uniqueIds);
+
+    if (error) throw new InternalServerErrorException('Failed to fetch barber timezones');
+    for (const row of data ?? []) {
+      result.set(row.user_id as string, (row.timezone as string) ?? 'UTC');
+    }
+    return result;
+  }
+
+  private splitLocalDateTime(utcIso: string, timezone: string): { date: string; time: string } {
+    const instant = new Date(utcIso);
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(instant);
+    const pick = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
+    const y = pick('year');
+    const mo = pick('month');
+    const d = pick('day');
+    const h = pick('hour') === '24' ? '00' : pick('hour');
+    const mi = pick('minute');
+    return { date: `${y}-${mo}-${d}`, time: `${h}:${mi}` };
   }
 
   public async getClientBookingDetail(
@@ -330,23 +465,6 @@ export class BookingsService {
     };
 
     return { booking };
-  }
-
-  private async resolveClientCursor(
-    clientId: string,
-    cursor?: string
-  ): Promise<{ id: string; scheduled_at: string } | null> {
-    if (!cursor) return null;
-    const { data, error } = await this.db
-      .from('bookings')
-      .select('id, scheduled_at')
-      .eq('id', cursor)
-      .eq('client_id', clientId)
-      .maybeSingle();
-
-    if (error) throw new InternalServerErrorException('Failed to resolve cursor');
-    if (!data) return null;
-    return { id: data.id as string, scheduled_at: data.scheduled_at as string };
   }
 
   private async loadClientBookingRelated(
@@ -449,7 +567,30 @@ export class BookingsService {
       cancelledBy: updated.cancelled_by as 'client' | 'barber',
     };
 
+    // Fire-and-forget — createAndSendNotification swallows its own errors
+    void this.notifyBarberOfBookingCancel(bookingId, clientId);
+
     return { booking };
+  }
+
+  private async notifyBarberOfBookingCancel(
+    bookingId: string,
+    clientAuthId: string,
+  ): Promise<void> {
+    const { data } = await this.db
+      .from('bookings')
+      .select('barber_id')
+      .eq('id', bookingId)
+      .maybeSingle();
+    if (!data) return;
+
+    await this.notificationsService.createAndSendNotification({
+      recipientId: data.barber_id as string,
+      recipientType: 'barber',
+      senderId: clientAuthId,
+      type: NotificationTypeDto.CANCELLED_BOOKING,
+      bookingId,
+    });
   }
 
   public async previewBooking(
@@ -540,6 +681,14 @@ export class BookingsService {
       },
       confirmedAt: row.confirmed_at,
     };
+
+    void this.notificationsService.createAndSendNotification({
+      recipientId: ctx.barberProfile.user_id,
+      recipientType: 'barber',
+      senderId: ctx.clientAuthId,
+      type: NotificationTypeDto.NEW_BOOKING,
+      bookingId: row.id,
+    });
 
     return { booking };
   }

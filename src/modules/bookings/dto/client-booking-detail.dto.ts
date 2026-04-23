@@ -1,10 +1,17 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { BookingTypeDto } from './preview-booking.dto';
 import { BookingStatusDto } from '../../barbers/dto/list-barber-bookings-query.dto';
-import {
-  ClientBookingBarberSummaryDto,
-  ClientBookingServiceSummaryDto,
-} from './client-booking-list-item.dto';
+
+export class ClientBookingBarberSummaryDto {
+  @ApiProperty() id: string;
+  @ApiProperty() name: string;
+  @ApiProperty({ nullable: true, type: String }) profilePhotoUrl: string | null;
+}
+
+export class ClientBookingServiceSummaryDto {
+  @ApiProperty() name: string;
+  @ApiProperty() durationMinutes: number;
+}
 
 export class ClientBookingDetailPricingDto {
   @ApiProperty() basePrice: number;

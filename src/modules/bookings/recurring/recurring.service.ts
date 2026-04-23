@@ -6,6 +6,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../../supabase/supabase.service';
+import { NotificationsService } from '../../notifications/notifications.service';
+import { NotificationTypeDto } from '../../notifications/dto/notification.dto';
 import { RecurringBookingGeneratorService } from './recurring-booking-generator.service';
 import {
   RecurringSlotDto,
@@ -31,6 +33,13 @@ import {
   RecurringBookingListItemDto,
   RecurringBookingsListResponseDto,
 } from './dto/recurring-booking-list.dto';
+import { ClientBookingsPageQueryDto } from '../dto/client-bookings-page-query.dto';
+import {
+  ClientRecurringBookingListItemDto,
+  ClientRecurringBookingsListResponseDto,
+  ClientRecurringStatusDto,
+} from './dto/client-recurring-booking-list.dto';
+import { BookingStatusDto } from '../../barbers/dto/list-barber-bookings-query.dto';
 import {
   MINUTE_MS,
   composeUtcFromLocal,
@@ -80,6 +89,7 @@ export class RecurringBookingsService {
   constructor(
     private readonly supabaseService: SupabaseService,
     private readonly generator: RecurringBookingGeneratorService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   protected get db() {
@@ -400,9 +410,16 @@ export class RecurringBookingsService {
       throw new InternalServerErrorException('Failed to create recurring booking');
     }
 
-    // TODO: notify barber of new recurring request
+    const insertedRow = inserted as RecurringRow;
+    void this.notificationsService.createAndSendNotification({
+      recipientId: insertedRow.barber_id,
+      recipientType: 'barber',
+      senderId: clientAuthId,
+      type: NotificationTypeDto.NEW_RECURRING_REQUEST,
+      recurringBookingId: insertedRow.id,
+    });
 
-    return { recurringBooking: await this.buildRecurringBookingDto(inserted as RecurringRow) };
+    return { recurringBooking: await this.buildRecurringBookingDto(insertedRow) };
   }
 
   // ────────────────────────────────────────────────────────────
@@ -440,7 +457,16 @@ export class RecurringBookingsService {
 
     await this.generator.generate(recurringBookingId);
 
-    return { recurringBooking: await this.buildRecurringBookingDto(updated as RecurringRow) };
+    const updatedRow = updated as RecurringRow;
+    void this.notificationsService.createAndSendNotification({
+      recipientId: updatedRow.client_id,
+      recipientType: 'client',
+      senderId: barberAuthId,
+      type: NotificationTypeDto.RECURRING_ACCEPTED,
+      recurringBookingId: updatedRow.id,
+    });
+
+    return { recurringBooking: await this.buildRecurringBookingDto(updatedRow) };
   }
 
   public async declineRecurringBooking(
@@ -473,9 +499,16 @@ export class RecurringBookingsService {
       throw new InternalServerErrorException('Failed to decline recurring booking');
     }
 
-    // TODO: notify client of decline
+    const updatedRow = updated as RecurringRow;
+    void this.notificationsService.createAndSendNotification({
+      recipientId: updatedRow.client_id,
+      recipientType: 'client',
+      senderId: barberAuthId,
+      type: NotificationTypeDto.RECURRING_REFUSED,
+      recurringBookingId: updatedRow.id,
+    });
 
-    return { recurringBooking: await this.buildRecurringBookingDto(updated as RecurringRow) };
+    return { recurringBooking: await this.buildRecurringBookingDto(updatedRow) };
   }
 
   // ────────────────────────────────────────────────────────────
@@ -494,6 +527,191 @@ export class RecurringBookingsService {
     query: ListRecurringBookingsQueryDto,
   ): Promise<RecurringBookingsListResponseDto> {
     return this.listRecurringBookings({ barberId: barberAuthId }, query);
+  }
+
+  // Page-based client recurring list (Feature 5 — /client/bookings/recurring).
+  // Only surfaces the three client-facing statuses (active, paused, pending_approval)
+  // and enriches each row with the next scheduled booking + remaining count.
+  public async listClientRecurringForClient(
+    clientAuthId: string,
+    query: ClientBookingsPageQueryDto,
+  ): Promise<ClientRecurringBookingsListResponseDto> {
+    const page = query.page ?? 1;
+    const limit = Math.min(query.limit ?? 10, 50);
+    const visibleStatuses = ['pending_barber_approval', 'active', 'paused'];
+
+    const { count, error: countErr } = await this.db
+      .from('recurring_bookings')
+      .select('id', { head: true, count: 'exact' })
+      .eq('client_id', clientAuthId)
+      .in('status', visibleStatuses);
+
+    if (countErr) throw new InternalServerErrorException('Failed to count recurring bookings');
+
+    const totalBookings = count ?? 0;
+    const totalPages = Math.max(1, Math.ceil(totalBookings / limit));
+    const startIndex = (page - 1) * limit;
+
+    const { data, error } = await this.db
+      .from('recurring_bookings')
+      .select('*')
+      .eq('client_id', clientAuthId)
+      .in('status', visibleStatuses)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(startIndex, startIndex + limit - 1);
+
+    if (error) throw new InternalServerErrorException('Failed to fetch recurring bookings');
+
+    const rows = (data ?? []) as RecurringRow[];
+
+    const recurringIds = rows.map((r) => r.id);
+    const [nextOccurrenceMap, appointmentsLeftMap] = await Promise.all([
+      this.loadNextOccurrenceRecord(recurringIds),
+      this.loadAppointmentsLeft(recurringIds),
+    ]);
+
+    const bookings: ClientRecurringBookingListItemDto[] = await Promise.all(
+      rows.map(async (row) => {
+        const [barberInfo, serviceLite] = await Promise.all([
+          this.fetchBarberNameAndPhoto(row.barber_id),
+          this.fetchServiceLite(row.barber_service_id),
+        ]);
+        const next = nextOccurrenceMap.get(row.id);
+        const timezone = await this.fetchBarberTimezone(row.barber_id);
+        const local = next
+          ? this.splitLocalDateTime(next.scheduled_at, timezone)
+          : { date: null, time: null };
+
+        return {
+          id: row.id,
+          barberName: barberInfo.name,
+          barberProfileImage: barberInfo.profilePhotoUrl,
+          serviceName: serviceLite.name,
+          nextAppointmentDate: local.date,
+          appointmentTime: local.time,
+          durationMinutes: serviceLite.durationMinutes,
+          bookingStatus: (next?.status as BookingStatusDto | undefined) ?? null,
+          recurringStatus: this.mapRecurringStatus(row.status),
+          appointmentsLeft: appointmentsLeftMap.get(row.id) ?? 0,
+        };
+      }),
+    );
+
+    // Secondary sort: nearest upcoming next-appointment first
+    bookings.sort((a, b) => {
+      if (a.nextAppointmentDate && b.nextAppointmentDate) {
+        return a.nextAppointmentDate.localeCompare(b.nextAppointmentDate);
+      }
+      if (a.nextAppointmentDate) return -1;
+      if (b.nextAppointmentDate) return 1;
+      return 0;
+    });
+
+    return {
+      bookings,
+      pagination: {
+        currentPage: page,
+        totalPages,
+        totalBookings,
+        limit,
+        hasNextPage: page < totalPages,
+      },
+    };
+  }
+
+  private async loadNextOccurrenceRecord(
+    recurringIds: string[],
+  ): Promise<Map<string, { scheduled_at: string; status: string }>> {
+    const result = new Map<string, { scheduled_at: string; status: string }>();
+    if (recurringIds.length === 0) return result;
+
+    const nowIso = new Date().toISOString();
+    const { data, error } = await this.db
+      .from('bookings')
+      .select('recurring_booking_id, scheduled_at, status')
+      .in('recurring_booking_id', recurringIds)
+      .gte('scheduled_at', nowIso)
+      .in('status', ['pending', 'confirmed'])
+      .order('scheduled_at', { ascending: true });
+
+    if (error) throw new InternalServerErrorException('Failed to fetch next occurrences');
+
+    for (const row of data ?? []) {
+      const id = row.recurring_booking_id as string;
+      if (!result.has(id)) {
+        result.set(id, {
+          scheduled_at: row.scheduled_at as string,
+          status: row.status as string,
+        });
+      }
+    }
+    return result;
+  }
+
+  private async loadAppointmentsLeft(recurringIds: string[]): Promise<Map<string, number>> {
+    const result = new Map<string, number>();
+    if (recurringIds.length === 0) return result;
+
+    const nowIso = new Date().toISOString();
+    const { data, error } = await this.db
+      .from('bookings')
+      .select('recurring_booking_id')
+      .in('recurring_booking_id', recurringIds)
+      .gte('scheduled_at', nowIso)
+      .in('status', ['pending', 'confirmed']);
+
+    if (error) throw new InternalServerErrorException('Failed to count remaining occurrences');
+
+    for (const id of recurringIds) result.set(id, 0);
+    for (const row of data ?? []) {
+      const id = row.recurring_booking_id as string;
+      result.set(id, (result.get(id) ?? 0) + 1);
+    }
+    return result;
+  }
+
+  private async fetchBarberNameAndPhoto(
+    barberId: string,
+  ): Promise<{ name: string; profilePhotoUrl: string | null }> {
+    const { data } = await this.db
+      .from('barbers')
+      .select('full_name, profile_photo_url')
+      .eq('user_id', barberId)
+      .maybeSingle();
+    return {
+      name: (data?.full_name as string | undefined) ?? 'Unknown',
+      profilePhotoUrl: (data?.profile_photo_url as string | null) ?? null,
+    };
+  }
+
+  private mapRecurringStatus(dbStatus: string): ClientRecurringStatusDto {
+    if (dbStatus === 'active') return ClientRecurringStatusDto.ACTIVE;
+    if (dbStatus === 'paused') return ClientRecurringStatusDto.PAUSED;
+    return ClientRecurringStatusDto.PENDING_APPROVAL;
+  }
+
+  private splitLocalDateTime(
+    utcIso: string,
+    timezone: string,
+  ): { date: string; time: string } {
+    const instant = new Date(utcIso);
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(instant);
+    const pick = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
+    const y = pick('year');
+    const mo = pick('month');
+    const d = pick('day');
+    const h = pick('hour') === '24' ? '00' : pick('hour');
+    const mi = pick('minute');
+    return { date: `${y}-${mo}-${d}`, time: `${h}:${mi}` };
   }
 
   private async listRecurringBookings(
@@ -681,9 +899,16 @@ export class RecurringBookingsService {
       throw new InternalServerErrorException('Failed to create renewal');
     }
 
-    // TODO: notify barber of renewal request
+    const insertedRow = inserted as RecurringRow;
+    void this.notificationsService.createAndSendNotification({
+      recipientId: insertedRow.barber_id,
+      recipientType: 'barber',
+      senderId: clientAuthId,
+      type: NotificationTypeDto.NEW_RECURRING_REQUEST,
+      recurringBookingId: insertedRow.id,
+    });
 
-    return { recurringBooking: await this.buildRecurringBookingDto(inserted as RecurringRow) };
+    return { recurringBooking: await this.buildRecurringBookingDto(insertedRow) };
   }
 
   // ────────────────────────────────────────────────────────────
@@ -727,7 +952,20 @@ export class RecurringBookingsService {
 
     await this.generator.cancelPausedBookings(recurringBookingId);
 
-    return { recurringBooking: await this.buildRecurringBookingDto(updated as RecurringRow) };
+    const updatedRow = updated as RecurringRow;
+    // Spec: only the client pausing/cancelling fires a barber-facing notification.
+    // When the barber initiates the action themselves there is no counterpart event.
+    if (role === 'client') {
+      void this.notificationsService.createAndSendNotification({
+        recipientId: updatedRow.barber_id,
+        recipientType: 'barber',
+        senderId: actorAuthId,
+        type: NotificationTypeDto.RECURRING_PAUSED,
+        recurringBookingId: updatedRow.id,
+      });
+    }
+
+    return { recurringBooking: await this.buildRecurringBookingDto(updatedRow) };
   }
 
   public async resumeRecurringBooking(
@@ -788,7 +1026,19 @@ export class RecurringBookingsService {
 
     await this.generator.cancelFutureBookings(recurringBookingId, role);
 
-    return { recurringBooking: await this.buildRecurringBookingDto(updated as RecurringRow) };
+    const updatedRow = updated as RecurringRow;
+    // Same rule as pause: only the client cancelling notifies the barber.
+    if (role === 'client') {
+      void this.notificationsService.createAndSendNotification({
+        recipientId: updatedRow.barber_id,
+        recipientType: 'barber',
+        senderId: actorAuthId,
+        type: NotificationTypeDto.RECURRING_CANCELLED,
+        recurringBookingId: updatedRow.id,
+      });
+    }
+
+    return { recurringBooking: await this.buildRecurringBookingDto(updatedRow) };
   }
 
   private async fetchRecurringForOwner(
