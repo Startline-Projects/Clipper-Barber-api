@@ -1,5 +1,20 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsEnum, IsInt, IsUUID, Matches, Max, Min } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  IsEnum,
+  IsInt,
+  IsUUID,
+  Matches,
+  Max,
+  Min,
+  ValidateNested,
+} from 'class-validator';
+import {
+  BookingServiceSelectionDto,
+  MAX_SERVICES_PER_BOOKING,
+} from '../../dto/preview-booking.dto';
 
 const TIME_REGEX = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -10,7 +25,17 @@ export enum RecurringBookingFrequency {
 
 export class CreateRecurringBookingDto {
   @ApiProperty() @IsUUID() barberId: string;
-  @ApiProperty() @IsUUID() barberServiceId: string;
+
+  @ApiProperty({
+    type: [BookingServiceSelectionDto],
+    description:
+      'Ordered list of services that make up each occurrence. Services are performed back-to-back and each carries its own bookingType (regular/day_off).',
+  })
+  @ArrayMinSize(1)
+  @ArrayMaxSize(MAX_SERVICES_PER_BOOKING)
+  @ValidateNested({ each: true })
+  @Type(() => BookingServiceSelectionDto)
+  services: BookingServiceSelectionDto[];
 
   @ApiProperty({ example: 2, description: '0 = Sunday, 6 = Saturday' })
   @IsInt()

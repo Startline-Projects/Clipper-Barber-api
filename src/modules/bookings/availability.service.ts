@@ -1,4 +1,4 @@
-import { Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { GetAvailabilityQueryDto } from './dto/get-availability-query.dto';
 import {
@@ -35,9 +35,9 @@ interface RawBarberServiceRow {
   barber_id: string;
   name: string;
   duration_minutes: number;
-  regular_price_usd: number;
-  after_hours_price_usd: number | null;
-  day_off_price_usd: number | null;
+  regular_price_usd: string | number;
+  after_hours_price_usd: string | number | null;
+  day_off_price_usd: string | number | null;
   is_active: boolean;
 }
 
@@ -46,7 +46,9 @@ interface GenerateSlotsParams {
   startTime: string;
   endTime: string;
   slotDuration: number;
-  price: number;
+  blockDuration: number;
+  slotsNeeded: number;
+  totalPrice: number;
   blockedSlotUtcMs: Set<number>;
   advanceCutoffMs: number;
   timezone: string;
@@ -78,21 +80,47 @@ export class AvailabilityService {
 
     const barberTimezone = (barberRow as RawBarberRow).timezone;
 
-    // Step 2 — Fetch the service (barber_id is auth UUID here)
-    const { data: serviceRow, error: serviceError } = await this.db
+    // Step 2 — Fetch all requested services, preserving client-supplied order
+    const requestedIds = query.serviceIds;
+    if (new Set(requestedIds).size !== requestedIds.length) {
+      throw new BadRequestException('Duplicate services are not allowed.');
+    }
+
+    const { data: serviceRows, error: serviceError } = await this.db
       .from('barber_services')
       .select(
         'id, barber_id, name, duration_minutes, regular_price_usd, after_hours_price_usd, day_off_price_usd, is_active'
       )
-      .eq('id', query.serviceId)
+      .in('id', requestedIds)
       .eq('barber_id', barberId)
-      .eq('is_active', true)
-      .maybeSingle();
+      .eq('is_active', true);
 
-    if (serviceError) throw new InternalServerErrorException('Failed to fetch service');
-    if (!serviceRow) throw new NotFoundException('Service not found or inactive');
+    if (serviceError) throw new InternalServerErrorException('Failed to fetch services');
 
-    const service = serviceRow as RawBarberServiceRow;
+    const serviceById = new Map<string, RawBarberServiceRow>();
+    for (const row of (serviceRows ?? []) as RawBarberServiceRow[]) {
+      serviceById.set(row.id, row);
+    }
+    if (serviceById.size !== requestedIds.length) {
+      throw new NotFoundException('One or more services not found or inactive');
+    }
+
+    const orderedServices = requestedIds.map((id) => serviceById.get(id) as RawBarberServiceRow);
+
+    // Each service occupies exactly one grid slot. Block duration is computed
+    // per-day (since slot_duration_minutes lives on the schedule), so we hold
+    // off on totalDuration here. Aggregate prices, on the other hand, are
+    // service-driven and don't depend on the day. When a service has no
+    // explicit after_hours_price_usd / day_off_price_usd we fall back to its
+    // regular_price_usd — keeps the slot bookable instead of dropping the
+    // whole window because of a missing price column.
+    const regularSum = this.sumPrices(orderedServices, (s) => Number(s.regular_price_usd));
+    const afterHoursSum = this.sumPrices(orderedServices, (s) =>
+      s.after_hours_price_usd !== null ? Number(s.after_hours_price_usd) : Number(s.regular_price_usd),
+    );
+    const dayOffSum = this.sumPrices(orderedServices, (s) =>
+      s.day_off_price_usd !== null ? Number(s.day_off_price_usd) : Number(s.regular_price_usd),
+    );
 
     // Step 3 — Fetch schedule rows, index by day_of_week
     const { data: scheduleRows, error: scheduleError } = await this.db
@@ -116,9 +144,9 @@ export class AvailabilityService {
     const endDate = new Date(query.endDate);
 
     // Step 4 — Fetch blocking bookings in range.
-    //   Widen by ±1 day: slot calendar dates are in the barber's TZ, but
-    //   scheduled_at is UTC — a slot near midnight local can map to the
-    //   adjacent UTC date, so we fetch a little extra and match on UTC ms.
+    //   Widen by ±1 day for TZ safety. For each booking we expand into the set
+    //   of grid slots it occupies based on its duration, so multi-slot bookings
+    //   block every grid position they cover — not just the start.
     const rangeStart = new Date(effectiveStart);
     rangeStart.setDate(rangeStart.getDate() - 1);
     const rangeEnd = new Date(endDate);
@@ -126,20 +154,13 @@ export class AvailabilityService {
 
     const { data: bookingRows, error: bookingError } = await this.db
       .from('bookings')
-      .select('scheduled_at')
+      .select('scheduled_at, duration_minutes')
       .eq('barber_id', barberId)
       .gte('scheduled_at', this.formatDate(rangeStart))
       .lt('scheduled_at', this.formatDate(rangeEnd))
       .in('status', ['confirmed', 'pending']);
 
     if (bookingError) throw new InternalServerErrorException('Failed to fetch bookings');
-
-    const blockedSlotUtcMs = new Set<number>();
-    for (const booking of bookingRows ?? []) {
-      const ms = new Date(booking.scheduled_at as string).getTime();
-      blockedSlotUtcMs.add(Math.floor(ms / MINUTE_MS) * MINUTE_MS);
-    }
-
 
     // Steps 5 & 6 — Generate and mark slots for each date
     const days: AvailabilityDayDto[] = [];
@@ -165,6 +186,18 @@ export class AvailabilityService {
 
       const advanceCutoffMs = now.getTime() + schedule.advance_notice_minutes * MINUTE_MS;
       const slotDuration = schedule.slot_duration_minutes;
+      // Each requested service consumes exactly one grid slot — block size
+      // is driven by the day's grid, NOT by the service's own duration.
+      const slotsNeeded = orderedServices.length;
+      const blockDuration = slotsNeeded * slotDuration;
+
+      // Expand every existing booking into the set of grid-slot-start ms it
+      // occupies (using THIS day's slot duration), so a multi-slot booking
+      // blocks every grid position it covers.
+      const blockedSlotUtcMs = this.buildBlockedSlotSet(
+        (bookingRows ?? []) as { scheduled_at: string; duration_minutes: number | null }[],
+        slotDuration,
+      );
 
       const dayDto: AvailabilityDayDto = {
         date: dateStr,
@@ -175,52 +208,53 @@ export class AvailabilityService {
       };
 
       if (schedule.is_working) {
-        // Regular slots
         if (schedule.regular_start_time && schedule.regular_end_time) {
           dayDto.slots.regular = this.generateSlots({
             date: dateStr,
             startTime: schedule.regular_start_time,
             endTime: schedule.regular_end_time,
             slotDuration,
-            price: service.regular_price_usd,
+            blockDuration,
+            slotsNeeded,
+            totalPrice: regularSum,
             blockedSlotUtcMs,
             advanceCutoffMs,
             timezone: barberTimezone,
           });
         }
 
-        // After-hours slots
         if (
           schedule.after_hours_enabled &&
           schedule.after_hours_start &&
-          schedule.after_hours_end &&
-          service.after_hours_price_usd != null
+          schedule.after_hours_end
         ) {
           dayDto.slots.afterHours = this.generateSlots({
             date: dateStr,
             startTime: schedule.after_hours_start,
             endTime: schedule.after_hours_end,
             slotDuration,
-            price: service.after_hours_price_usd,
+            blockDuration,
+            slotsNeeded,
+            totalPrice: afterHoursSum,
             blockedSlotUtcMs,
             advanceCutoffMs,
             timezone: barberTimezone,
           });
         }
       } else {
-        // Day-off slots
         if (
           schedule.day_off_booking_enabled &&
           schedule.day_off_start_time &&
-          schedule.day_off_end_time &&
-          service.day_off_price_usd != null
+          schedule.day_off_end_time
         ) {
           dayDto.slots.dayOff = this.generateSlots({
             date: dateStr,
             startTime: schedule.day_off_start_time,
             endTime: schedule.day_off_end_time,
             slotDuration,
-            price: service.day_off_price_usd,
+            blockDuration,
+            slotsNeeded,
+            totalPrice: dayOffSum,
             blockedSlotUtcMs,
             advanceCutoffMs,
             timezone: barberTimezone,
@@ -231,16 +265,77 @@ export class AvailabilityService {
       days.push(dayDto);
     }
 
-    const serviceSummary: ServiceSummaryDto = {
-      id: service.id,
-      name: service.name,
-      durationMinutes: service.duration_minutes,
-      regularPrice: service.regular_price_usd,
-      afterHoursPrice: service.after_hours_price_usd,
-      dayOffPrice: service.day_off_price_usd,
-    };
+    const services: ServiceSummaryDto[] = orderedServices.map((s) => ({
+      id: s.id,
+      name: s.name,
+      durationMinutes: s.duration_minutes,
+      regularPrice: Number(s.regular_price_usd),
+      // Surface the regular fallback explicitly — `null` here would mislead
+      // the client into thinking the slot is unbookable for that type.
+      afterHoursPrice:
+        s.after_hours_price_usd !== null
+          ? Number(s.after_hours_price_usd)
+          : Number(s.regular_price_usd),
+      dayOffPrice:
+        s.day_off_price_usd !== null
+          ? Number(s.day_off_price_usd)
+          : Number(s.regular_price_usd),
+    }));
 
-    return { barberId, service: serviceSummary, days };
+    // Representative block duration for the response root: use the most
+    // common slot_duration_minutes across the barber's schedule rows. In
+    // practice all days share the same grid, so this is unambiguous.
+    const representativeSlotDuration =
+      this.pickRepresentativeSlotDuration(scheduleByDay) ?? 0;
+    const totalDurationMinutes = orderedServices.length * representativeSlotDuration;
+
+    return {
+      barberId,
+      services,
+      totalDurationMinutes,
+      days,
+    };
+  }
+
+  private sumPrices(
+    services: RawBarberServiceRow[],
+    pick: (s: RawBarberServiceRow) => number,
+  ): number {
+    let sum = 0;
+    for (const s of services) sum += pick(s);
+    return Number(sum.toFixed(2));
+  }
+
+  private pickRepresentativeSlotDuration(
+    scheduleByDay: Map<number, RawScheduleRow>,
+  ): number | null {
+    const counts = new Map<number, number>();
+    for (const row of scheduleByDay.values()) {
+      counts.set(row.slot_duration_minutes, (counts.get(row.slot_duration_minutes) ?? 0) + 1);
+    }
+    let best: { value: number; count: number } | null = null;
+    for (const [value, count] of counts) {
+      if (!best || count > best.count) best = { value, count };
+    }
+    return best ? best.value : null;
+  }
+
+  private buildBlockedSlotSet(
+    bookings: { scheduled_at: string; duration_minutes: number | null }[],
+    slotDurationMinutes: number,
+  ): Set<number> {
+    const blocked = new Set<number>();
+    const stepMs = slotDurationMinutes * MINUTE_MS;
+    for (const b of bookings) {
+      const startMs = new Date(b.scheduled_at).getTime();
+      const duration = b.duration_minutes ?? slotDurationMinutes;
+      const endMs = startMs + duration * MINUTE_MS;
+      const startKey = Math.floor(startMs / MINUTE_MS) * MINUTE_MS;
+      for (let ms = startKey; ms < endMs; ms += stepMs) {
+        blocked.add(ms);
+      }
+    }
+    return blocked;
   }
 
   private generateSlots(params: GenerateSlotsParams): SlotDto[] {
@@ -249,7 +344,9 @@ export class AvailabilityService {
       startTime,
       endTime,
       slotDuration,
-      price,
+      blockDuration,
+      slotsNeeded,
+      totalPrice,
       blockedSlotUtcMs,
       advanceCutoffMs,
       timezone,
@@ -258,19 +355,26 @@ export class AvailabilityService {
     const endMinutes = this.timeToMinutes(endTime);
     const slots: SlotDto[] = [];
 
-    for (let m = startMinutes; m + slotDuration <= endMinutes; m += slotDuration) {
+    for (let m = startMinutes; m + blockDuration <= endMinutes; m += slotDuration) {
       const time = this.minutesToTime(m);
       const slotUtcMs = this.composeUtcFromLocal(date, time, timezone).getTime();
-
-      // Exclude slots that violate advance notice or are in the past
       if (slotUtcMs < advanceCutoffMs) continue;
 
-      const slotKey = Math.floor(slotUtcMs / MINUTE_MS) * MINUTE_MS;
+      let available = true;
+      for (let k = 0; k < slotsNeeded; k++) {
+        const gridMs = slotUtcMs + k * slotDuration * MINUTE_MS;
+        const gridKey = Math.floor(gridMs / MINUTE_MS) * MINUTE_MS;
+        if (blockedSlotUtcMs.has(gridKey)) {
+          available = false;
+          break;
+        }
+      }
+
       slots.push({
         time,
-        endTime: this.minutesToTime(m + slotDuration),
-        available: !blockedSlotUtcMs.has(slotKey),
-        price,
+        endTime: this.minutesToTime(m + blockDuration),
+        available,
+        price: totalPrice,
       });
     }
 
@@ -294,9 +398,6 @@ export class AvailabilityService {
     return date.toISOString().split('T')[0];
   }
 
-  // Convert a wall-clock (date, time) in the given IANA timezone into a UTC
-  // Date. Two passes are enough because IANA offsets are discrete per instant;
-  // the second pass resolves wall-clocks near DST transitions.
   private composeUtcFromLocal(date: string, time: string, timezone: string): Date {
     const [y, mo, d] = date.split('-').map(Number);
     const [h, mi] = time.split(':').map(Number);
@@ -309,7 +410,6 @@ export class AvailabilityService {
     return guess;
   }
 
-  // Offset (in ms) that the given IANA timezone is ahead of UTC at `instant`.
   private tzOffsetMs(instant: Date, timezone: string): number {
     const parts = new Intl.DateTimeFormat('en-US', {
       timeZone: timezone,

@@ -6,39 +6,40 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationTypeDto } from '../notifications/dto/notification.dto';
+import { ConversationsService } from '../messages/conversations.service';
 import { BookingTypeDto, PreviewBookingDto } from './dto/preview-booking.dto';
-import { BookingPreviewDto, PreviewBookingResponseDto } from './dto/preview-booking-response.dto';
+import {
+  BookingPreviewDto,
+  BookingServiceSummaryDto,
+  PreviewBookingResponseDto,
+} from './dto/preview-booking-response.dto';
 import { ConfirmBookingResponseDto, ConfirmedBookingDto } from './dto/confirm-booking-response.dto';
 import {
   CancelBookingResponseDto,
   CancelledBookingDto,
 } from './dto/cancel-booking-response.dto';
-import { ListClientBookingsQueryDto } from './dto/list-client-bookings-query.dto';
-import {
-  BookingStatusDto,
-  BookingTimeframeDto,
-  BookingTypeFilterDto,
-} from '../barbers/dto/list-barber-bookings-query.dto';
-import {
-  ClientBookingListItemDto,
-  ClientBookingsListResponseDto,
-} from './dto/client-booking-list-item.dto';
+import { BookingStatusDto } from '../barbers/dto/list-barber-bookings-query.dto';
 import {
   ClientBookingDetailDto,
   ClientBookingDetailResponseDto,
   ClientBookingReviewDto,
+  ClientBookingServiceSummaryDto,
 } from './dto/client-booking-detail.dto';
+import { ClientBookingsPageQueryDto } from './dto/client-bookings-page-query.dto';
+import {
+  ClientUpcomingBookingDto,
+  ClientUpcomingBookingsResponseDto,
+} from './dto/client-upcoming-booking.dto';
+import {
+  ClientPastBookingDto,
+  ClientPastBookingsResponseDto,
+} from './dto/client-past-booking.dto';
 
-const DEFAULT_PAGE_SIZE = 20;
-const MAX_PAGE_SIZE = 50;
-
-const CLIENT_LIST_SELECT = `
-  id, scheduled_at, booking_type, price_usd, status,
-  duration_minutes, barber_id, barber_service_id,
-  cancelled_at, cancelled_by,
-  no_show_charged, no_show_charge_amount_usd,
-  recurring_booking_id
-`;
+const DEFAULT_PAGE = 1;
+const DEFAULT_LIMIT = 10;
+const MAX_LIMIT = 50;
 
 const CLIENT_DETAIL_SELECT = `
   id, scheduled_at, booking_type, status,
@@ -48,22 +49,6 @@ const CLIENT_DETAIL_SELECT = `
   no_show_charged, no_show_charge_amount_usd,
   recurring_booking_id
 `;
-
-interface ClientBookingListRow {
-  id: string;
-  scheduled_at: string;
-  booking_type: string;
-  price_usd: string | number;
-  status: string;
-  duration_minutes: number | null;
-  barber_id: string;
-  barber_service_id: string | null;
-  cancelled_at: string | null;
-  cancelled_by: string | null;
-  no_show_charged: boolean;
-  no_show_charge_amount_usd: string | number | null;
-  recurring_booking_id: string | null;
-}
 
 interface ClientBookingDetailRow {
   id: string;
@@ -123,6 +108,7 @@ interface BarberScheduleRow {
   is_working: boolean;
   regular_start_time: string | null;
   regular_end_time: string | null;
+  slot_duration_minutes: number;
   after_hours_enabled: boolean;
   after_hours_start: string | null;
   after_hours_end: string | null;
@@ -132,12 +118,27 @@ interface BarberScheduleRow {
   advance_notice_minutes: number;
 }
 
+interface ResolvedBookingService {
+  service: BarberServiceRow;
+  bookingType: BookingTypeDto;
+  startOffsetMinutes: number;
+  pricing: {
+    basePrice: number;
+    additionalCost: number;
+    totalPrice: number;
+  };
+}
+
 interface ValidatedSlotContext {
   clientAuthId: string;
   barberProfile: BarberProfileRow;
-  service: BarberServiceRow;
+  services: ResolvedBookingService[];
+  // Each service occupies exactly one grid slot of this length. The block
+  // is `services.length * slotDurationMinutes` long.
+  slotDurationMinutes: number;
+  totalDurationMinutes: number;
   scheduledAtUtc: Date;
-  pricing: {
+  totalPricing: {
     basePrice: number;
     additionalCost: number;
     totalPrice: number;
@@ -146,105 +147,262 @@ interface ValidatedSlotContext {
 
 @Injectable()
 export class BookingsService {
-  constructor(private readonly supabaseService: SupabaseService) {}
+  constructor(
+    private readonly supabaseService: SupabaseService,
+    private readonly notificationsService: NotificationsService,
+    private readonly conversationsService: ConversationsService,
+  ) {}
 
   private get db() {
     return this.supabaseService.getClient();
   }
 
   // ────────────────────────────────────────────────────────────
-  // Client bookings — list / detail
+  // Client bookings — upcoming / past (page-based)
   // ────────────────────────────────────────────────────────────
 
-  public async listClientBookings(
+  public async listClientUpcomingBookings(
     clientId: string,
-    query: ListClientBookingsQueryDto
-  ): Promise<ClientBookingsListResponseDto> {
-    const limit = Math.min(query.limit ?? DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
+    query: ClientBookingsPageQueryDto,
+  ): Promise<ClientUpcomingBookingsResponseDto> {
+    const page = query.page ?? DEFAULT_PAGE;
+    const limit = Math.min(query.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
     const nowIso = new Date().toISOString();
-    const ascending = query.timeframe === BookingTimeframeDto.UPCOMING;
 
-    const cursorRow = await this.resolveClientCursor(clientId, query.cursor);
+    // Fetch all upcoming ids to dedupe recurring (keep earliest per recurring_booking_id)
+    const { data: idRows, error: idErr } = await this.db
+      .from('bookings')
+      .select('id, scheduled_at, recurring_booking_id')
+      .eq('client_id', clientId)
+      .in('status', ['pending', 'confirmed'])
+      .gte('scheduled_at', nowIso)
+      .order('scheduled_at', { ascending: true })
+      .order('id', { ascending: true });
 
-    let q = this.db.from('bookings').select(CLIENT_LIST_SELECT).eq('client_id', clientId);
+    if (idErr) throw new InternalServerErrorException('Failed to fetch bookings');
 
-    if (query.timeframe === BookingTimeframeDto.UPCOMING) {
-      q = q.in('status', ['pending', 'confirmed']).gte('scheduled_at', nowIso);
-    } else {
-      q = q.or(`status.in.(completed,cancelled,no_show),scheduled_at.lt.${nowIso}`);
-    }
-
-    if (query.type === BookingTypeFilterDto.ONE_OFF) {
-      q = q.is('recurring_booking_id', null);
-    } else if (query.type === BookingTypeFilterDto.RECURRING) {
-      q = q.not('recurring_booking_id', 'is', null);
-    }
-
-    if (cursorRow) {
-      if (ascending) {
-        q = q.or(
-          `scheduled_at.gt.${cursorRow.scheduled_at},and(scheduled_at.eq.${cursorRow.scheduled_at},id.gt.${cursorRow.id})`
-        );
-      } else {
-        q = q.or(
-          `scheduled_at.lt.${cursorRow.scheduled_at},and(scheduled_at.eq.${cursorRow.scheduled_at},id.lt.${cursorRow.id})`
-        );
-      }
-    }
-
-    q = q
-      .order('scheduled_at', { ascending })
-      .order('id', { ascending })
-      .limit(limit + 1);
-
-    const { data, error } = await q;
-    if (error) throw new InternalServerErrorException('Failed to fetch bookings');
-
-    const rows = (data ?? []) as ClientBookingListRow[];
-    const hasMore = rows.length > limit;
-    const pageRows = hasMore ? rows.slice(0, limit) : rows;
-
-    const { barberMap, serviceMap } = await this.loadClientBookingRelated(
-      pageRows.map((r) => r.barber_id),
-      pageRows.map((r) => r.barber_service_id).filter((id): id is string => !!id)
+    const deduped = this.dedupRecurringUpcoming(
+      (idRows ?? []) as { id: string; scheduled_at: string; recurring_booking_id: string | null }[],
     );
 
-    const bookings: ClientBookingListItemDto[] = pageRows.map((r) => {
+    const totalBookings = deduped.length;
+    const totalPages = Math.max(1, Math.ceil(totalBookings / limit));
+    const startIndex = (page - 1) * limit;
+    const pageIds = deduped.slice(startIndex, startIndex + limit).map((r) => r.id);
+
+    const bookings = await this.hydrateUpcomingBookings(pageIds);
+
+    return {
+      bookings,
+      pagination: {
+        currentPage: page,
+        totalPages,
+        totalBookings,
+        limit,
+        hasNextPage: page < totalPages,
+      },
+    };
+  }
+
+  public async listClientPastBookings(
+    clientId: string,
+    query: ClientBookingsPageQueryDto,
+  ): Promise<ClientPastBookingsResponseDto> {
+    const page = query.page ?? DEFAULT_PAGE;
+    const limit = Math.min(query.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
+    const nowIso = new Date().toISOString();
+
+    const { count, error: countErr } = await this.db
+      .from('bookings')
+      .select('id', { head: true, count: 'exact' })
+      .eq('client_id', clientId)
+      .lt('scheduled_at', nowIso);
+
+    if (countErr) throw new InternalServerErrorException('Failed to count past bookings');
+
+    const totalBookings = count ?? 0;
+    const totalPages = Math.max(1, Math.ceil(totalBookings / limit));
+    const startIndex = (page - 1) * limit;
+
+    const { data, error } = await this.db
+      .from('bookings')
+      .select(
+        'id, scheduled_at, price_usd, status, barber_id, barber_service_id, duration_minutes',
+      )
+      .eq('client_id', clientId)
+      .lt('scheduled_at', nowIso)
+      .order('scheduled_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(startIndex, startIndex + limit - 1);
+
+    if (error) throw new InternalServerErrorException('Failed to fetch past bookings');
+
+    const rows = (data ?? []) as {
+      id: string;
+      scheduled_at: string;
+      price_usd: string | number;
+      status: string;
+      barber_id: string;
+      barber_service_id: string | null;
+      duration_minutes: number | null;
+    }[];
+
+    const [{ barberMap, serviceMap }, reviewedIds, timezoneMap] = await Promise.all([
+      this.loadClientBookingRelated(
+        rows.map((r) => r.barber_id),
+        rows.map((r) => r.barber_service_id).filter((id): id is string => !!id),
+      ),
+      this.fetchReviewedBookingIds(rows.map((r) => r.id)),
+      this.fetchBarberTimezones(rows.map((r) => r.barber_id)),
+    ]);
+
+    const bookings: ClientPastBookingDto[] = rows.map((r) => {
       const barber = barberMap.get(r.barber_id);
       const service = r.barber_service_id ? serviceMap.get(r.barber_service_id) : undefined;
-      const isCancelled = r.status === 'cancelled';
+      const tz = timezoneMap.get(r.barber_id) ?? 'UTC';
+      const local = this.splitLocalDateTime(r.scheduled_at, tz);
       return {
         id: r.id,
-        barber: {
-          id: r.barber_id,
-          name: barber?.full_name ?? 'Unknown',
-          profilePhotoUrl: barber?.profile_photo_url ?? null,
-        },
-        service: {
-          name: service?.name ?? 'Service',
-          durationMinutes: service?.duration_minutes ?? r.duration_minutes ?? 0,
-        },
-        scheduledAt: new Date(r.scheduled_at).toISOString(),
-        bookingType: r.booking_type as BookingTypeDto,
-        totalPrice: Number(r.price_usd),
-        status: r.status as BookingStatusDto,
-        cancelledAt: isCancelled && r.cancelled_at ? new Date(r.cancelled_at).toISOString() : null,
-        cancelledBy: isCancelled ? ((r.cancelled_by as 'client' | 'barber' | null) ?? null) : null,
-        noShowCharged: r.no_show_charged,
-        noShowChargeAmountUsd:
-          r.no_show_charge_amount_usd !== null && r.no_show_charge_amount_usd !== undefined
-            ? Number(r.no_show_charge_amount_usd)
-            : null,
-        isRecurring: r.recurring_booking_id !== null,
-        recurringBookingId: r.recurring_booking_id,
+        barberName: barber?.full_name ?? 'Unknown',
+        barberProfileImage: barber?.profile_photo_url ?? null,
+        serviceName: service?.name ?? 'Service',
+        appointmentDate: local.date,
+        appointmentTime: local.time,
+        pricePaid: Number(r.price_usd),
+        hasReview: reviewedIds.has(r.id),
       };
     });
 
     return {
       bookings,
-      nextCursor: hasMore && pageRows.length > 0 ? pageRows[pageRows.length - 1].id : null,
-      hasMore,
+      pagination: {
+        currentPage: page,
+        totalPages,
+        totalBookings,
+        limit,
+        hasNextPage: page < totalPages,
+      },
     };
+  }
+
+  private dedupRecurringUpcoming(
+    rows: { id: string; scheduled_at: string; recurring_booking_id: string | null }[],
+  ): { id: string; scheduled_at: string }[] {
+    const seenRecurring = new Set<string>();
+    const result: { id: string; scheduled_at: string }[] = [];
+    for (const r of rows) {
+      if (r.recurring_booking_id) {
+        if (seenRecurring.has(r.recurring_booking_id)) continue;
+        seenRecurring.add(r.recurring_booking_id);
+      }
+      result.push({ id: r.id, scheduled_at: r.scheduled_at });
+    }
+    return result;
+  }
+
+  private async hydrateUpcomingBookings(ids: string[]): Promise<ClientUpcomingBookingDto[]> {
+    if (ids.length === 0) return [];
+
+    const { data, error } = await this.db
+      .from('bookings')
+      .select(
+        'id, scheduled_at, status, barber_id, barber_service_id, duration_minutes, recurring_booking_id',
+      )
+      .in('id', ids);
+
+    if (error) throw new InternalServerErrorException('Failed to fetch bookings');
+
+    const rows = (data ?? []) as {
+      id: string;
+      scheduled_at: string;
+      status: string;
+      barber_id: string;
+      barber_service_id: string | null;
+      duration_minutes: number | null;
+      recurring_booking_id: string | null;
+    }[];
+
+    // Preserve the order of `ids` (which was pre-sorted ascending by date)
+    const orderIndex = new Map<string, number>();
+    ids.forEach((id, i) => orderIndex.set(id, i));
+    rows.sort((a, b) => (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0));
+
+    const [{ barberMap, serviceMap }, timezoneMap] = await Promise.all([
+      this.loadClientBookingRelated(
+        rows.map((r) => r.barber_id),
+        rows.map((r) => r.barber_service_id).filter((id): id is string => !!id),
+      ),
+      this.fetchBarberTimezones(rows.map((r) => r.barber_id)),
+    ]);
+
+    return rows.map((r) => {
+      const barber = barberMap.get(r.barber_id);
+      const service = r.barber_service_id ? serviceMap.get(r.barber_service_id) : undefined;
+      const tz = timezoneMap.get(r.barber_id) ?? 'UTC';
+      const local = this.splitLocalDateTime(r.scheduled_at, tz);
+      return {
+        id: r.id,
+        barberName: barber?.full_name ?? 'Unknown',
+        barberProfileImage: barber?.profile_photo_url ?? null,
+        serviceName: service?.name ?? 'Service',
+        appointmentDate: local.date,
+        appointmentTime: local.time,
+        durationMinutes: r.duration_minutes ?? service?.duration_minutes ?? 0,
+        status: r.status as BookingStatusDto,
+        isRecurring: r.recurring_booking_id !== null,
+      };
+    });
+  }
+
+  private async fetchReviewedBookingIds(bookingIds: string[]): Promise<Set<string>> {
+    const reviewed = new Set<string>();
+    if (bookingIds.length === 0) return reviewed;
+
+    const { data, error } = await this.db
+      .from('reviews')
+      .select('booking_id')
+      .in('booking_id', bookingIds);
+
+    if (error) throw new InternalServerErrorException('Failed to fetch reviews');
+    for (const row of data ?? []) reviewed.add(row.booking_id as string);
+    return reviewed;
+  }
+
+  private async fetchBarberTimezones(barberIds: string[]): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    const uniqueIds = Array.from(new Set(barberIds));
+    if (uniqueIds.length === 0) return result;
+
+    const { data, error } = await this.db
+      .from('barbers')
+      .select('user_id, timezone')
+      .in('user_id', uniqueIds);
+
+    if (error) throw new InternalServerErrorException('Failed to fetch barber timezones');
+    for (const row of data ?? []) {
+      result.set(row.user_id as string, (row.timezone as string) ?? 'UTC');
+    }
+    return result;
+  }
+
+  private splitLocalDateTime(utcIso: string, timezone: string): { date: string; time: string } {
+    const instant = new Date(utcIso);
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(instant);
+    const pick = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
+    const y = pick('year');
+    const mo = pick('month');
+    const d = pick('day');
+    const h = pick('hour') === '24' ? '00' : pick('hour');
+    const mi = pick('minute');
+    return { date: `${y}-${mo}-${d}`, time: `${h}:${mi}` };
   }
 
   public async getClientBookingDetail(
@@ -263,28 +421,29 @@ export class BookingsService {
 
     const row = data as ClientBookingDetailRow;
 
-    const { barberMap, serviceMap } = await this.loadClientBookingRelated(
-      [row.barber_id],
-      row.barber_service_id ? [row.barber_service_id] : []
-    );
+    const [bookingServicesSummary, { barberMap }, reviewResult] = await Promise.all([
+      this.loadBookingServicesDetail(row.id),
+      this.loadClientBookingRelated([row.barber_id], []),
+      this.db
+        .from('reviews')
+        .select('id, rating, comment, created_at')
+        .eq('booking_id', bookingId)
+        .maybeSingle(),
+    ]);
+
+    if (reviewResult.error) throw new InternalServerErrorException('Failed to fetch review');
 
     const barber = barberMap.get(row.barber_id);
-    const service = row.barber_service_id ? serviceMap.get(row.barber_service_id) : undefined;
 
-    const { data: reviewRow, error: reviewError } = await this.db
-      .from('reviews')
-      .select('id, rating, comment, created_at')
-      .eq('booking_id', bookingId)
-      .maybeSingle();
-
-    if (reviewError) throw new InternalServerErrorException('Failed to fetch review');
-
+    const reviewRow = reviewResult.data as
+      | { id: string; rating: number; comment: string | null; created_at: string }
+      | null;
     const review: ClientBookingReviewDto | null = reviewRow
       ? {
-          id: reviewRow.id as string,
-          rating: reviewRow.rating as number,
-          comment: (reviewRow.comment as string | null) ?? null,
-          createdAt: new Date(reviewRow.created_at as string).toISOString(),
+          id: reviewRow.id,
+          rating: reviewRow.rating,
+          comment: reviewRow.comment ?? null,
+          createdAt: new Date(reviewRow.created_at).toISOString(),
         }
       : null;
 
@@ -299,6 +458,10 @@ export class BookingsService {
     const totalPrice = Number(row.price_usd);
 
     const isCancelled = row.status === 'cancelled';
+    // Block duration is the snapshot on the bookings row (slot count × slot
+    // duration). Don't sum the per-service service durations — those are
+    // display info and may not equal the actual reserved time.
+    const totalDurationMinutes = row.duration_minutes ?? 0;
 
     const booking: ClientBookingDetailDto = {
       id: row.id,
@@ -307,12 +470,9 @@ export class BookingsService {
         name: barber?.full_name ?? 'Unknown',
         profilePhotoUrl: barber?.profile_photo_url ?? null,
       },
-      service: {
-        name: service?.name ?? 'Service',
-        durationMinutes: service?.duration_minutes ?? row.duration_minutes ?? 0,
-      },
+      services: bookingServicesSummary,
       scheduledAt: new Date(row.scheduled_at).toISOString(),
-      bookingType: row.booking_type as BookingTypeDto,
+      totalDurationMinutes,
       totalPrice,
       status: row.status as BookingStatusDto,
       cancelledAt: isCancelled && row.cancelled_at ? new Date(row.cancelled_at).toISOString() : null,
@@ -332,21 +492,68 @@ export class BookingsService {
     return { booking };
   }
 
-  private async resolveClientCursor(
-    clientId: string,
-    cursor?: string
-  ): Promise<{ id: string; scheduled_at: string } | null> {
-    if (!cursor) return null;
+  private async loadBookingServicesDetail(
+    bookingId: string,
+  ): Promise<ClientBookingServiceSummaryDto[]> {
     const { data, error } = await this.db
-      .from('bookings')
-      .select('id, scheduled_at')
-      .eq('id', cursor)
-      .eq('client_id', clientId)
-      .maybeSingle();
+      .from('booking_services')
+      .select(
+        'barber_service_id, booking_type, duration_minutes, base_price_usd, slot_type_surcharge_usd, price_usd, sort_order',
+      )
+      .eq('booking_id', bookingId)
+      .order('sort_order', { ascending: true });
 
-    if (error) throw new InternalServerErrorException('Failed to resolve cursor');
-    if (!data) return null;
-    return { id: data.id as string, scheduled_at: data.scheduled_at as string };
+    if (error) throw new InternalServerErrorException('Failed to fetch booking services');
+
+    const rows = (data ?? []) as {
+      barber_service_id: string;
+      booking_type: string;
+      duration_minutes: number;
+      base_price_usd: string | number;
+      slot_type_surcharge_usd: string | number;
+      price_usd: string | number;
+      sort_order: number;
+    }[];
+
+    if (rows.length === 0) return [];
+
+    // booking_services.duration_minutes is the SLOT share (drives the
+    // schedule math). For display we surface the service's real duration
+    // from barber_services.
+    const serviceIds = rows.map((r) => r.barber_service_id);
+    const { data: serviceData, error: serviceError } = await this.db
+      .from('barber_services')
+      .select('id, name, duration_minutes')
+      .in('id', serviceIds);
+
+    if (serviceError) throw new InternalServerErrorException('Failed to fetch service names');
+    const serviceById = new Map<string, { name: string; duration_minutes: number }>();
+    for (const s of (serviceData ?? []) as {
+      id: string;
+      name: string;
+      duration_minutes: number;
+    }[]) {
+      serviceById.set(s.id, { name: s.name, duration_minutes: s.duration_minutes });
+    }
+
+    let offset = 0;
+    return rows.map((r) => {
+      const startOffsetMinutes = offset;
+      offset += r.duration_minutes;
+      const svc = serviceById.get(r.barber_service_id);
+      return {
+        id: r.barber_service_id,
+        name: svc?.name ?? 'Service',
+        durationMinutes: svc?.duration_minutes ?? r.duration_minutes,
+        bookingType: r.booking_type as BookingTypeDto,
+        startOffsetMinutes,
+        pricing: {
+          basePrice: Number(r.base_price_usd),
+          additionalCost: Number(r.slot_type_surcharge_usd),
+          totalPrice: Number(r.price_usd),
+        },
+      };
+    });
   }
 
   private async loadClientBookingRelated(
@@ -449,7 +656,30 @@ export class BookingsService {
       cancelledBy: updated.cancelled_by as 'client' | 'barber',
     };
 
+    // Fire-and-forget — createAndSendNotification swallows its own errors
+    void this.notifyBarberOfBookingCancel(bookingId, clientId);
+
     return { booking };
+  }
+
+  private async notifyBarberOfBookingCancel(
+    bookingId: string,
+    clientAuthId: string,
+  ): Promise<void> {
+    const { data } = await this.db
+      .from('bookings')
+      .select('barber_id')
+      .eq('id', bookingId)
+      .maybeSingle();
+    if (!data) return;
+
+    await this.notificationsService.createAndSendNotification({
+      recipientId: data.barber_id as string,
+      recipientType: 'barber',
+      senderId: clientAuthId,
+      type: NotificationTypeDto.CANCELLED_BOOKING,
+      bookingId,
+    });
   }
 
   public async previewBooking(
@@ -460,13 +690,9 @@ export class BookingsService {
 
     const preview: BookingPreviewDto = {
       scheduledAt: ctx.scheduledAtUtc.toISOString(),
-      bookingType: dto.bookingType,
-      service: {
-        id: ctx.service.id,
-        name: ctx.service.name,
-        durationMinutes: ctx.service.duration_minutes,
-      },
-      pricing: ctx.pricing,
+      totalDurationMinutes: ctx.totalDurationMinutes,
+      services: ctx.services.map((s) => this.toServiceSummary(s)),
+      pricing: ctx.totalPricing,
       barber: {
         id: ctx.barberProfile.user_id,
         name: ctx.barberProfile.full_name,
@@ -489,20 +715,21 @@ export class BookingsService {
       ctx.scheduledAtUtc
     );
     const nowIso = new Date().toISOString();
+    const primary = ctx.services[0];
 
     const { data, error } = await this.db
       .from('bookings')
       .insert({
         barber_id: ctx.barberProfile.user_id,
         client_id: ctx.clientAuthId,
-        barber_service_id: ctx.service.id,
-        service_type: ctx.service.service_type,
-        booking_type: dto.bookingType,
+        barber_service_id: primary.service.id,
+        service_type: primary.service.service_type,
+        booking_type: primary.bookingType,
         scheduled_at: ctx.scheduledAtUtc.toISOString(),
-        duration_minutes: ctx.service.duration_minutes,
-        base_price_usd: ctx.pricing.basePrice,
-        slot_type_surcharge_usd: ctx.pricing.additionalCost,
-        price_usd: ctx.pricing.totalPrice,
+        duration_minutes: ctx.totalDurationMinutes,
+        base_price_usd: ctx.totalPricing.basePrice,
+        slot_type_surcharge_usd: ctx.totalPricing.additionalCost,
+        price_usd: ctx.totalPricing.totalPrice,
         status: initialStatus,
         confirmed_at: initialStatus === 'confirmed' ? nowIso : null,
       })
@@ -510,7 +737,7 @@ export class BookingsService {
       .single();
 
     if (error) {
-      if (error.code === '23505') {
+      if (error.code === '23505' || error.code === '23P01') {
         throw new ConflictException('This slot was just taken. Please select another time.');
       }
       throw new InternalServerErrorException('Failed to create booking');
@@ -523,17 +750,39 @@ export class BookingsService {
       confirmed_at: string | null;
     };
 
+    // Snapshot one row per service. duration_minutes is the SLOT size (the
+    // share of the block this service occupies), not the service's nominal
+    // duration — that lives on barber_services and is fetched fresh for
+    // display.
+    const bookingServiceRows = ctx.services.map((s, idx) => ({
+      booking_id: row.id,
+      barber_service_id: s.service.id,
+      service_type: s.service.service_type,
+      booking_type: s.bookingType,
+      duration_minutes: ctx.slotDurationMinutes,
+      base_price_usd: s.pricing.basePrice,
+      slot_type_surcharge_usd: s.pricing.additionalCost,
+      price_usd: s.pricing.totalPrice,
+      sort_order: idx,
+    }));
+
+    const { error: childError } = await this.db
+      .from('booking_services')
+      .insert(bookingServiceRows);
+
+    if (childError) {
+      // Best-effort rollback so the booking row doesn't linger without children
+      await this.db.from('bookings').delete().eq('id', row.id);
+      throw new InternalServerErrorException('Failed to create booking services');
+    }
+
     const booking: ConfirmedBookingDto = {
       id: row.id,
       status: row.status,
       scheduledAt: new Date(row.scheduled_at).toISOString(),
-      bookingType: dto.bookingType,
-      service: {
-        id: ctx.service.id,
-        name: ctx.service.name,
-        durationMinutes: ctx.service.duration_minutes,
-      },
-      pricing: ctx.pricing,
+      totalDurationMinutes: ctx.totalDurationMinutes,
+      services: ctx.services.map((s) => this.toServiceSummary(s)),
+      pricing: ctx.totalPricing,
       barber: {
         id: ctx.barberProfile.user_id,
         name: ctx.barberProfile.full_name,
@@ -541,7 +790,31 @@ export class BookingsService {
       confirmedAt: row.confirmed_at,
     };
 
+    void this.notificationsService.createAndSendNotification({
+      recipientId: ctx.barberProfile.user_id,
+      recipientType: 'barber',
+      senderId: ctx.clientAuthId,
+      type: NotificationTypeDto.NEW_BOOKING,
+      bookingId: row.id,
+    });
+
+    void this.conversationsService.markHasBookingIfConversationExists(
+      ctx.barberProfile.user_id,
+      ctx.clientAuthId,
+    );
+
     return { booking };
+  }
+
+  private toServiceSummary(s: ResolvedBookingService): BookingServiceSummaryDto {
+    return {
+      id: s.service.id,
+      name: s.service.name,
+      durationMinutes: s.service.duration_minutes,
+      bookingType: s.bookingType,
+      startOffsetMinutes: s.startOffsetMinutes,
+      pricing: s.pricing,
+    };
   }
 
   // allow_auto_confirm wins unconditionally. auto_confirm_today only fires
@@ -598,28 +871,33 @@ export class BookingsService {
 
     const barberProfile = barberRow as BarberProfileRow;
 
-    // 3. Service belongs to barber and is active
-    const { data: serviceRow, error: serviceError } = await this.db
+    // 3. Services belong to the barber and are all active; no duplicates allowed.
+    const requestedIds = dto.services.map((s) => s.barberServiceId);
+    if (new Set(requestedIds).size !== requestedIds.length) {
+      throw new BadRequestException('Duplicate services are not allowed in a single booking.');
+    }
+
+    const { data: serviceRows, error: serviceError } = await this.db
       .from('barber_services')
       .select(
         'id, barber_id, name, service_type, duration_minutes, regular_price_usd, after_hours_price_usd, day_off_price_usd, is_active'
       )
-      .eq('id', dto.barberServiceId)
+      .in('id', requestedIds)
       .eq('barber_id', dto.barberId)
-      .eq('is_active', true)
-      .maybeSingle();
+      .eq('is_active', true);
 
-    if (serviceError) throw new InternalServerErrorException('Failed to fetch service');
-    if (!serviceRow) {
-      throw new NotFoundException('Service not found or inactive for this barber');
+    if (serviceError) throw new InternalServerErrorException('Failed to fetch services');
+
+    const serviceById = new Map<string, BarberServiceRow>();
+    for (const row of (serviceRows ?? []) as BarberServiceRow[]) {
+      serviceById.set(row.id, row);
+    }
+    if (serviceById.size !== requestedIds.length) {
+      throw new NotFoundException('One or more services were not found or inactive for this barber');
     }
 
-    const service = serviceRow as BarberServiceRow;
-
-    // 4. Derive day-of-week from the calendar date (TZ-independent: the date is
-    //    already expressed in the barber's local calendar)
+    // 4. Derive day-of-week and fetch the schedule for this day.
     const dayOfWeek = this.dayOfWeekFromDate(dto.date);
-
     const { data: scheduleRow, error: scheduleError } = await this.db
       .from('barber_schedules')
       .select('*')
@@ -631,13 +909,45 @@ export class BookingsService {
     if (!scheduleRow) {
       throw new BadRequestException('Barber has no schedule configured for this day');
     }
-
     const schedule = scheduleRow as BarberScheduleRow;
 
-    // 5. Validate the slot time sits in the right window for its booking type.
-    this.validateSlotWindow(schedule, dto.bookingType, dto.slotTime);
+    // 5. Walk the block slice-by-slice. Each service consumes exactly one
+    //    grid slot of length `schedule.slot_duration_minutes` — the
+    //    service's own `duration_minutes` is metadata only (display).
+    const slotStartMinutes = this.timeToMinutes(dto.slotTime);
+    const slotStep = schedule.slot_duration_minutes;
+    const resolved: ResolvedBookingService[] = [];
+    let summedBase = 0;
+    let summedSurcharge = 0;
+    let summedTotal = 0;
 
-    // 6. Compose the UTC timestamp for the slot using the barber's timezone
+    dto.services.forEach((selection, idx) => {
+      const service = serviceById.get(selection.barberServiceId);
+      if (!service) {
+        throw new NotFoundException('Service not found or inactive for this barber');
+      }
+
+      const sliceStart = slotStartMinutes + idx * slotStep;
+      const sliceEnd = sliceStart + slotStep;
+
+      this.validateSliceWindow(schedule, selection.bookingType, sliceStart, sliceEnd);
+
+      const pricing = this.resolvePricing(service, selection.bookingType);
+      summedBase = Number((summedBase + pricing.basePrice).toFixed(2));
+      summedSurcharge = Number((summedSurcharge + pricing.additionalCost).toFixed(2));
+      summedTotal = Number((summedTotal + pricing.totalPrice).toFixed(2));
+
+      resolved.push({
+        service,
+        bookingType: selection.bookingType,
+        startOffsetMinutes: idx * slotStep,
+        pricing,
+      });
+    });
+
+    const totalDurationMinutes = dto.services.length * slotStep;
+
+    // 6. Compose the UTC timestamp for the block start
     const scheduledAtUtc = this.composeUtcFromLocal(dto.date, dto.slotTime, barberProfile.timezone);
 
     // 7. Advance notice check — UTC vs UTC, TZ-safe
@@ -648,39 +958,68 @@ export class BookingsService {
       throw new BadRequestException('Advance notice window has passed — please pick a later slot.');
     }
 
-    // 8. Service has pricing for the booking type
-    const pricing = this.resolvePricing(service, dto.bookingType);
-
-    // 9. Slot not already taken (unique index is defined on (barber_id, scheduled_at))
-    const { data: existingBooking, error: conflictError } = await this.db
-      .from('bookings')
-      .select('id')
-      .eq('barber_id', dto.barberId)
-      .eq('scheduled_at', scheduledAtUtc.toISOString())
-      .neq('status', 'cancelled')
-      .maybeSingle();
-
-    if (conflictError) throw new InternalServerErrorException('Failed to check slot availability');
-    if (existingBooking) {
-      throw new ConflictException('This slot is already booked.');
-    }
+    // 8. Overlap check: no other non-cancelled booking for this barber may
+    //    intersect [scheduledAtUtc, scheduledAtUtc + totalDurationMinutes).
+    //    The DB-level exclusion constraint catches races; this makes the
+    //    error message friendly when the conflict is already visible.
+    await this.assertNoOverlap(
+      dto.barberId,
+      scheduledAtUtc,
+      totalDurationMinutes,
+    );
 
     return {
       clientAuthId: authUserId,
       barberProfile,
-      service,
+      services: resolved,
+      slotDurationMinutes: slotStep,
+      totalDurationMinutes,
       scheduledAtUtc,
-      pricing,
+      totalPricing: {
+        basePrice: summedBase,
+        additionalCost: summedSurcharge,
+        totalPrice: summedTotal,
+      },
     };
   }
 
-  private validateSlotWindow(
+  private async assertNoOverlap(
+    barberId: string,
+    startUtc: Date,
+    totalDurationMinutes: number,
+  ): Promise<void> {
+    const blockEndMs = startUtc.getTime() + totalDurationMinutes * 60_000;
+    // Longest individual service duration allowed is 60 min, bounded; grab any
+    // non-cancelled booking that starts within [block_end - 4h, block_end) and
+    // filter overlaps in-memory. 4h is a safety margin > max block + max
+    // service duration.
+    const windowStartMs = startUtc.getTime() - 4 * 60 * 60_000;
+    const { data, error } = await this.db
+      .from('bookings')
+      .select('scheduled_at, duration_minutes')
+      .eq('barber_id', barberId)
+      .neq('status', 'cancelled')
+      .gte('scheduled_at', new Date(windowStartMs).toISOString())
+      .lt('scheduled_at', new Date(blockEndMs).toISOString());
+
+    if (error) throw new InternalServerErrorException('Failed to check slot availability');
+
+    for (const row of data ?? []) {
+      const existingStart = new Date(row.scheduled_at as string).getTime();
+      const existingDuration = (row.duration_minutes as number | null) ?? 0;
+      const existingEnd = existingStart + existingDuration * 60_000;
+      if (existingEnd > startUtc.getTime() && existingStart < blockEndMs) {
+        throw new ConflictException('This slot is already booked.');
+      }
+    }
+  }
+
+  private validateSliceWindow(
     schedule: BarberScheduleRow,
     bookingType: BookingTypeDto,
-    slotTime: string
+    sliceStartMinutes: number,
+    sliceEndMinutes: number,
   ): void {
-    const minutesOfDay = this.timeToMinutes(slotTime);
-
     if (bookingType === BookingTypeDto.REGULAR) {
       if (!schedule.is_working) {
         throw new BadRequestException('Barber is not working on this day for regular bookings.');
@@ -688,11 +1027,12 @@ export class BookingsService {
       if (!schedule.regular_start_time || !schedule.regular_end_time) {
         throw new BadRequestException('Regular hours are not configured for this day.');
       }
-      this.assertWithinWindow(
-        minutesOfDay,
+      this.assertSliceWithinWindow(
+        sliceStartMinutes,
+        sliceEndMinutes,
         schedule.regular_start_time,
         schedule.regular_end_time,
-        'regular'
+        'regular',
       );
       return;
     }
@@ -704,11 +1044,12 @@ export class BookingsService {
       if (!schedule.after_hours_start || !schedule.after_hours_end) {
         throw new BadRequestException('After-hours window is not configured for this day.');
       }
-      this.assertWithinWindow(
-        minutesOfDay,
+      this.assertSliceWithinWindow(
+        sliceStartMinutes,
+        sliceEndMinutes,
         schedule.after_hours_start,
         schedule.after_hours_end,
-        'after_hours'
+        'after_hours',
       );
       return;
     }
@@ -720,24 +1061,28 @@ export class BookingsService {
     if (!schedule.day_off_start_time || !schedule.day_off_end_time) {
       throw new BadRequestException('Day-off window is not configured for this day.');
     }
-    this.assertWithinWindow(
-      minutesOfDay,
+    this.assertSliceWithinWindow(
+      sliceStartMinutes,
+      sliceEndMinutes,
       schedule.day_off_start_time,
       schedule.day_off_end_time,
-      'day_off'
+      'day_off',
     );
   }
 
-  private assertWithinWindow(
-    minutesOfDay: number,
-    startTime: string,
-    endTime: string,
-    typeLabel: string
+  private assertSliceWithinWindow(
+    sliceStart: number,
+    sliceEnd: number,
+    windowStart: string,
+    windowEnd: string,
+    typeLabel: string,
   ): void {
-    const start = this.timeToMinutes(startTime);
-    const end = this.timeToMinutes(endTime);
-    if (minutesOfDay < start || minutesOfDay >= end) {
-      throw new BadRequestException(`slotTime is outside the ${typeLabel} window for this day.`);
+    const start = this.timeToMinutes(windowStart);
+    const end = this.timeToMinutes(windowEnd);
+    if (sliceStart < start || sliceEnd > end) {
+      throw new BadRequestException(
+        `A ${typeLabel} service in this booking does not fit inside the ${typeLabel} window for this day.`,
+      );
     }
   }
 
@@ -807,8 +1152,10 @@ export class BookingsService {
         ? service.after_hours_price_usd
         : service.day_off_price_usd;
 
+    // Fall back to the regular price when the service has no explicit
+    // after_hours / day_off pricing — the slot is still bookable, no surcharge.
     if (typePriceRaw === null || typePriceRaw === undefined) {
-      throw new BadRequestException(`This service is not available for ${bookingType} bookings.`);
+      return { basePrice, additionalCost: 0, totalPrice: basePrice };
     }
 
     const totalPrice = Number(typePriceRaw);

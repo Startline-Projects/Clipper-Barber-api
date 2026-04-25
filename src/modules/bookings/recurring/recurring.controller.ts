@@ -138,7 +138,7 @@ export class ClientRecurringSlotsController {
     @Param('barberId', ParseUUIDPipe) barberId: string,
     @Query() query: GetRecurringSlotsQueryDto,
   ): Promise<RecurringSlotsResponseDto> {
-    return this.recurringService.getRecurringSlots(barberId, query.serviceId, query.dayOfWeek);
+    return this.recurringService.getRecurringSlots(barberId, query.serviceIds, query.dayOfWeek);
   }
 }
 
