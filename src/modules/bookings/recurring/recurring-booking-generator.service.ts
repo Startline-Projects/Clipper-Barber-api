@@ -1,5 +1,6 @@
 import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { SupabaseService } from '../../supabase/supabase.service';
+import { ConversationsService } from '../../messages/conversations.service';
 import {
   composeUtcFromLocal,
   localDateInTz,
@@ -16,6 +17,7 @@ interface RecurringBookingRow {
   slot_time: string;
   frequency: 'weekly' | 'biweekly';
   price_usd: string | number;
+  duration_minutes: number | null;
   status: string;
   window_start_date: string | null;
   pause_start_date: string | null;
@@ -40,11 +42,25 @@ interface ScheduleRow {
   recurring_extra_charge_usd: number | string | null;
 }
 
+interface RecurringServiceSnapshot {
+  barber_service_id: string;
+  service_type: string;
+  booking_type: string;
+  duration_minutes: number;
+  base_price_usd: string | number;
+  slot_type_surcharge_usd: string | number;
+  price_usd: string | number;
+  sort_order: number;
+}
+
 @Injectable()
 export class RecurringBookingGeneratorService {
   private readonly logger = new Logger(RecurringBookingGeneratorService.name);
 
-  constructor(private readonly supabaseService: SupabaseService) {}
+  constructor(
+    private readonly supabaseService: SupabaseService,
+    private readonly conversationsService: ConversationsService,
+  ) {}
 
   private get db() {
     return this.supabaseService.getClient();
@@ -61,11 +77,21 @@ export class RecurringBookingGeneratorService {
     if (!recurring.window_start_date) return;
 
     const barber = await this.fetchBarber(recurring.barber_id);
-    const service = await this.fetchService(recurring.barber_service_id);
     const schedule = await this.fetchSchedule(recurring.barber_id, recurring.day_of_week);
+    if (!barber || !schedule) return;
 
-    if (!barber || !service || !schedule) return;
-    if (service.recurring_price_usd === null) return;
+    const serviceSnapshots = await this.fetchServiceSnapshots(recurringBookingId);
+    if (serviceSnapshots.length === 0) {
+      // Legacy row with no child rows — nothing to materialise against the
+      // multi-service contract. Safe to skip.
+      return;
+    }
+
+    const totalDuration =
+      recurring.duration_minutes ??
+      serviceSnapshots.reduce((acc, s) => acc + s.duration_minutes, 0);
+
+    const primary = serviceSnapshots[0];
 
     const targetDates = this.computeTargetDates(
       recurring.window_start_date,
@@ -79,14 +105,13 @@ export class RecurringBookingGeneratorService {
 
     const existing = await this.fetchExistingScheduledAt(recurringBookingId);
     const slotTime = recurring.slot_time.substring(0, 5);
-    const basePrice = Number(service.recurring_price_usd);
-    const extraCharge =
-      schedule.recurring_extra_charge_usd !== null &&
-      schedule.recurring_extra_charge_usd !== undefined
-        ? Number(schedule.recurring_extra_charge_usd)
-        : 0;
     const totalPrice = Number(recurring.price_usd);
-    const bookingType = schedule.is_working ? 'regular' : 'day_off';
+    const totalBase = Number(
+      serviceSnapshots.reduce((acc, s) => acc + Number(s.base_price_usd), 0).toFixed(2),
+    );
+    const totalSurcharge = Number(
+      serviceSnapshots.reduce((acc, s) => acc + Number(s.slot_type_surcharge_usd), 0).toFixed(2),
+    );
 
     for (const date of targetDates) {
       const scheduledAt = composeUtcFromLocal(date, slotTime, barber.timezone);
@@ -94,35 +119,86 @@ export class RecurringBookingGeneratorService {
       if (existing.has(scheduledIso)) continue;
 
       const nowIso = new Date().toISOString();
-      const { error } = await this.db.from('bookings').insert({
-        barber_id: recurring.barber_id,
-        client_id: recurring.client_id,
-        barber_service_id: recurring.barber_service_id,
-        recurring_booking_id: recurringBookingId,
-        service_type: service.service_type,
-        booking_type: bookingType,
-        scheduled_at: scheduledIso,
-        duration_minutes: service.duration_minutes,
-        base_price_usd: basePrice,
-        slot_type_surcharge_usd: extraCharge,
-        price_usd: totalPrice,
-        status: 'confirmed',
-        confirmed_at: nowIso,
-      });
+      const { data: inserted, error } = await this.db
+        .from('bookings')
+        .insert({
+          barber_id: recurring.barber_id,
+          client_id: recurring.client_id,
+          barber_service_id: primary.barber_service_id,
+          recurring_booking_id: recurringBookingId,
+          service_type: primary.service_type,
+          booking_type: primary.booking_type,
+          scheduled_at: scheduledIso,
+          duration_minutes: totalDuration,
+          base_price_usd: totalBase,
+          slot_type_surcharge_usd: totalSurcharge,
+          price_usd: totalPrice,
+          status: 'confirmed',
+          confirmed_at: nowIso,
+        })
+        .select('id')
+        .single();
 
-      // 23505 = one-off booking already holds this exact slot. Skip per
-      // agreed generator policy; the client keeps their other occurrences.
-      if (error && error.code !== '23505') {
+      // 23505 / 23P01 = another booking already holds an overlapping slot.
+      // Skip per agreed generator policy; the client keeps their other
+      // occurrences.
+      if (error && error.code !== '23505' && error.code !== '23P01') {
         throw new InternalServerErrorException(
           `Failed to generate recurring booking occurrence: ${error.message}`,
         );
       }
-      if (error && error.code === '23505') {
+      if (error) {
         this.logger.warn(
-          `Generator skipped ${scheduledIso} for recurring_booking ${recurringBookingId} — slot held by one-off booking`,
+          `Generator skipped ${scheduledIso} for recurring_booking ${recurringBookingId} — slot held by another booking`,
+        );
+        continue;
+      }
+
+      const bookingId = (inserted as { id: string }).id;
+      const childRows = serviceSnapshots.map((s) => ({
+        booking_id: bookingId,
+        barber_service_id: s.barber_service_id,
+        service_type: s.service_type,
+        booking_type: s.booking_type,
+        duration_minutes: s.duration_minutes,
+        base_price_usd: s.base_price_usd,
+        slot_type_surcharge_usd: s.slot_type_surcharge_usd,
+        price_usd: s.price_usd,
+        sort_order: s.sort_order,
+      }));
+
+      const { error: childError } = await this.db
+        .from('booking_services')
+        .insert(childRows);
+
+      if (childError) {
+        // Undo the just-inserted booking so the row doesn't sit without children.
+        await this.db.from('bookings').delete().eq('id', bookingId);
+        throw new InternalServerErrorException(
+          `Failed to fan out booking services: ${childError.message}`,
         );
       }
     }
+
+    void this.conversationsService.markHasBookingIfConversationExists(
+      recurring.barber_id,
+      recurring.client_id,
+    );
+  }
+
+  private async fetchServiceSnapshots(
+    recurringBookingId: string,
+  ): Promise<RecurringServiceSnapshot[]> {
+    const { data, error } = await this.db
+      .from('recurring_booking_services')
+      .select(
+        'barber_service_id, service_type, booking_type, duration_minutes, base_price_usd, slot_type_surcharge_usd, price_usd, sort_order',
+      )
+      .eq('recurring_booking_id', recurringBookingId)
+      .order('sort_order', { ascending: true });
+
+    if (error) throw new InternalServerErrorException('Failed to fetch recurring booking services');
+    return (data ?? []) as RecurringServiceSnapshot[];
   }
 
   // When a pause is applied, cancel the already-generated booking rows that
@@ -201,7 +277,7 @@ export class RecurringBookingGeneratorService {
     const { data, error } = await this.db
       .from('recurring_bookings')
       .select(
-        'id, client_id, barber_id, barber_service_id, day_of_week, slot_time, frequency, price_usd, status, window_start_date, pause_start_date, pause_end_date, paused_by',
+        'id, client_id, barber_id, barber_service_id, day_of_week, slot_time, frequency, price_usd, duration_minutes, status, window_start_date, pause_start_date, pause_end_date, paused_by',
       )
       .eq('id', id)
       .maybeSingle();

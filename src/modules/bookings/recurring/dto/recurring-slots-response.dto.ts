@@ -14,7 +14,7 @@ export class RecurringSlotsResponseDto {
 
   @ApiProperty({
     description:
-      'False when the barber, service, or this day does not support recurring bookings. The other fields will be empty/null in that case.',
+      'False when the barber, one of the services, or this day does not support recurring bookings. The other fields will be empty/null in that case.',
   })
   recurringAvailable: boolean;
 
@@ -29,9 +29,12 @@ export class RecurringSlotsResponseDto {
     nullable: true,
     example: 55.0,
     description:
-      'Exact total per-occurrence price for this day: service.recurring_price_usd + (schedule.recurring_extra_charge_usd ?? 0)',
+      'Summed per-occurrence price across all selected services: sum(service.recurring_price_usd) + (schedule.recurring_extra_charge_usd ?? 0)',
   })
   recurringPriceUsd: number | null;
+
+  @ApiProperty({ example: 60, description: 'Summed duration of all selected services, in minutes.' })
+  totalDurationMinutes: number;
 
   @ApiProperty({ type: [RecurringSlotDto] })
   slots: RecurringSlotDto[];

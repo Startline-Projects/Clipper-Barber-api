@@ -28,6 +28,7 @@ export interface AvailabilityDayDto {
 
 export interface AvailabilityResponseDto {
   barberId: string;
-  service: ServiceSummaryDto;
+  services: ServiceSummaryDto[];
+  totalDurationMinutes: number;
   days: AvailabilityDayDto[];
 }

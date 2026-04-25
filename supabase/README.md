@@ -50,7 +50,8 @@ Go to **Database → Replication** and enable the following tables for the `supa
 
 | Table                   | Reason                                                         |
 | ----------------------- | -------------------------------------------------------------- |
-| `messages`              | Live chat between barber and client                            |
+| `messages`              | Live chat messages within a thread (auto-added by migration)   |
+| `conversations`         | Live chat list updates + unread counts (auto-added by migration) |
 | `bookings`              | Barber sees new bookings instantly; client sees status updates |
 | `recurring_occurrences` | Live status updates for recurring charge events                |
 

@@ -11,6 +11,7 @@ export enum NotificationTypeDto {
   RECURRING_ACCEPTED = 'recurring_accepted',
   RECURRING_REFUSED = 'recurring_refused',
   RECURRING_EXPIRING = 'recurring_expiring',
+  NEW_MESSAGE = 'new_message',
 }
 
 export class NotificationDto {
@@ -37,6 +38,12 @@ export class NotificationDto {
 
   @ApiPropertyOptional({ nullable: true })
   recurringBookingId!: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  conversationId!: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  messageId!: string | null;
 
   @ApiProperty()
   createdAt!: string;

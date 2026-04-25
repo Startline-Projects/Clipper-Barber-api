@@ -22,8 +22,10 @@ import { PauseRecurringBookingDto } from './dto/pause-recurring-booking.dto';
 import {
   RecurringBookingDto,
   RecurringBookingResponseDto,
+  RecurringBookingServiceDto,
   RecurringBookingStatus,
 } from './dto/recurring-booking.dto';
+import { BookingTypeDto } from '../dto/preview-booking.dto';
 import {
   RecurringBookingDetailResponseDto,
   RecurringOccurrenceDto,
@@ -64,9 +66,22 @@ interface BarberServiceRow {
   id: string;
   barber_id: string;
   name: string;
+  service_type: string;
   duration_minutes: number;
+  regular_price_usd: number | string;
   recurring_price_usd: number | string | null;
   is_active: boolean;
+}
+
+interface RecurringBookingServiceSnapshot {
+  barber_service_id: string;
+  service_type: string;
+  booking_type: string;
+  duration_minutes: number;
+  base_price_usd: string | number;
+  slot_type_surcharge_usd: string | number;
+  price_usd: string | number;
+  sort_order: number;
 }
 
 interface ScheduleRow {
@@ -98,7 +113,7 @@ export class RecurringBookingsService {
 
   public async getRecurringSlots(
     barberId: string,
-    serviceId: string,
+    serviceIds: string[],
     dayOfWeek: number,
   ): Promise<RecurringSlotsResponseDto> {
     const unavailable: RecurringSlotsResponseDto = {
@@ -106,14 +121,21 @@ export class RecurringBookingsService {
       recurringAvailable: false,
       recurringFrequencyOptions: [],
       recurringPriceUsd: null,
+      totalDurationMinutes: 0,
       slots: [],
     };
+
+    if (new Set(serviceIds).size !== serviceIds.length) {
+      throw new BadRequestException('Duplicate services are not allowed.');
+    }
 
     const barber = await this.fetchBarber(barberId);
     if (!barber.recurring_enabled) return unavailable;
 
-    const service = await this.fetchService(barberId, serviceId);
-    if (!service || service.recurring_price_usd === null) return unavailable;
+    const services = await this.fetchServices(barberId, serviceIds);
+    if (services.length !== serviceIds.length) return unavailable;
+    // No early-out when recurring_price_usd is null on a service — we fall
+    // back to that service's regular_price_usd so the slot stays bookable.
 
     const schedule = await this.fetchSchedule(barberId, dayOfWeek);
     if (!schedule || !schedule.recurring_enabled) return unavailable;
@@ -124,36 +146,55 @@ export class RecurringBookingsService {
     const frequencyOptions = this.resolveFrequencyOptions(schedule.recurring_frequency);
     if (frequencyOptions.length === 0) return unavailable;
 
+    // Each service consumes one grid slot; service.duration_minutes is
+    // metadata only. Block size is driven entirely by the schedule's grid.
+    const totalDuration = services.length * schedule.slot_duration_minutes;
+
     const extraCharge =
       schedule.recurring_extra_charge_usd !== null &&
       schedule.recurring_extra_charge_usd !== undefined
         ? Number(schedule.recurring_extra_charge_usd)
         : 0;
-    const recurringPriceUsd = Number(
-      (Number(service.recurring_price_usd) + extraCharge).toFixed(2),
+    const summedServicePrice = services.reduce(
+      (acc, s) => acc + this.recurringBasePrice(s),
+      0,
     );
+    const recurringPriceUsd = Number((summedServicePrice + extraCharge).toFixed(2));
 
-    const slotTimes = this.generateSlotTimes(
+    const slotTimes = this.generateSlotTimesForBlock(
       window.start,
       window.end,
       schedule.slot_duration_minutes,
+      totalDuration,
     );
 
-    const recurringBlocked = await this.fetchRecurringBlockedSlotTimes(barberId, dayOfWeek);
+    const recurringBlocked = await this.fetchRecurringBlockedSlotTimes(
+      barberId,
+      dayOfWeek,
+      schedule.slot_duration_minutes,
+    );
     const oneOffBlockedSlotMs = await this.fetchOneOffBlockedSlotMs(
       barberId,
       dayOfWeek,
       barber.timezone,
       slotTimes,
+      schedule.slot_duration_minutes,
+      totalDuration,
     );
 
     const slots: RecurringSlotDto[] = slotTimes.map((time) => {
-      if (recurringBlocked.has(time)) return { time, available: false };
-
-      // Only flag unavailable if at least one upcoming matching date has a
-      // one-off conflict at this exact slot time.
-      const hasConflict = oneOffBlockedSlotMs.has(time);
-      return { time, available: !hasConflict };
+      const slotStartMin = timeToMinutes(time);
+      // services.length grid slots, back-to-back from the candidate start.
+      // A slot is unavailable if any of those positions collides with
+      // another recurring subscription or one-off booking.
+      for (let k = 0; k < services.length; k++) {
+        const gridTime = minutesToTime(
+          slotStartMin + k * schedule.slot_duration_minutes,
+        );
+        if (recurringBlocked.has(gridTime)) return { time, available: false };
+        if (oneOffBlockedSlotMs.has(gridTime)) return { time, available: false };
+      }
+      return { time, available: true };
     });
 
     return {
@@ -161,8 +202,31 @@ export class RecurringBookingsService {
       recurringAvailable: true,
       recurringFrequencyOptions: frequencyOptions,
       recurringPriceUsd,
+      totalDurationMinutes: totalDuration,
       slots,
     };
+  }
+
+  private async fetchServices(
+    barberId: string,
+    serviceIds: string[],
+  ): Promise<BarberServiceRow[]> {
+    if (serviceIds.length === 0) return [];
+    const { data, error } = await this.db
+      .from('barber_services')
+      .select(
+        'id, barber_id, name, service_type, duration_minutes, regular_price_usd, recurring_price_usd, is_active',
+      )
+      .in('id', serviceIds)
+      .eq('barber_id', barberId)
+      .eq('is_active', true);
+
+    if (error) throw new InternalServerErrorException('Failed to fetch services');
+    const byId = new Map<string, BarberServiceRow>();
+    for (const row of (data ?? []) as BarberServiceRow[]) byId.set(row.id, row);
+    return serviceIds
+      .map((id) => byId.get(id))
+      .filter((s): s is BarberServiceRow => s !== undefined);
   }
 
   private async fetchBarber(barberId: string): Promise<BarberRow> {
@@ -184,7 +248,9 @@ export class RecurringBookingsService {
   ): Promise<BarberServiceRow | null> {
     const { data, error } = await this.db
       .from('barber_services')
-      .select('id, barber_id, name, duration_minutes, recurring_price_usd, is_active')
+      .select(
+        'id, barber_id, name, service_type, duration_minutes, regular_price_usd, recurring_price_usd, is_active',
+      )
       .eq('id', serviceId)
       .eq('barber_id', barberId)
       .eq('is_active', true)
@@ -240,41 +306,63 @@ export class RecurringBookingsService {
     return [];
   }
 
-  private generateSlotTimes(start: string, end: string, stepMin: number): string[] {
+  // Candidate block starts: aligned to the day's slot grid and guaranteed to
+  // fit the combined `totalDuration` before the window ends. Starts where the
+  // block would overshoot the window are NOT emitted — they can never be
+  // bookable regardless of conflicts.
+  private generateSlotTimesForBlock(
+    start: string,
+    end: string,
+    stepMin: number,
+    totalDuration: number,
+  ): string[] {
     const startM = timeToMinutes(start);
     const endM = timeToMinutes(end);
     const times: string[] = [];
-    for (let m = startM; m + stepMin <= endM; m += stepMin) {
+    for (let m = startM; m + totalDuration <= endM; m += stepMin) {
       times.push(minutesToTime(m));
     }
     return times;
   }
 
+  // Expand each existing recurring subscription into the set of grid-slot
+  // times it occupies, so a multi-slot recurring blocks every grid position
+  // within [slot_time, slot_time + duration_minutes).
   private async fetchRecurringBlockedSlotTimes(
     barberId: string,
     dayOfWeek: number,
+    slotDurationMinutes: number,
   ): Promise<Set<string>> {
     const { data, error } = await this.db
       .from('recurring_bookings')
-      .select('slot_time')
+      .select('slot_time, duration_minutes')
       .eq('barber_id', barberId)
       .eq('day_of_week', dayOfWeek)
       .in('status', ['pending_barber_approval', 'active', 'paused']);
 
     if (error) throw new InternalServerErrorException('Failed to fetch recurring conflicts');
     const blocked = new Set<string>();
-    for (const r of data ?? []) blocked.add(this.trimTime(r.slot_time as string));
+    for (const r of data ?? []) {
+      const startM = timeToMinutes(this.trimTime(r.slot_time as string));
+      const duration = (r.duration_minutes as number | null) ?? slotDurationMinutes;
+      for (let m = startM; m < startM + duration; m += slotDurationMinutes) {
+        blocked.add(minutesToTime(m));
+      }
+    }
     return blocked;
   }
 
-  // For each candidate slot time, check whether any one-off booking at any
-  // upcoming matching day_of_week date within the 60-day window is holding
-  // that slot. A conflict at any matching date marks the slot unavailable.
+  // For each grid slot time on this day-of-week (across the next 60 days),
+  // check whether any one-off booking occupies it. Existing bookings are
+  // expanded by their own duration so a 60-min booking at 14:00 blocks both
+  // the 14:00 and 14:30 grid slots on a 30-min grid.
   private async fetchOneOffBlockedSlotMs(
     barberId: string,
     dayOfWeek: number,
     timezone: string,
     slotTimes: string[],
+    slotDurationMinutes: number,
+    totalDuration: number,
   ): Promise<Set<string>> {
     const blockedTimes = new Set<string>();
     if (slotTimes.length === 0) return blockedTimes;
@@ -283,43 +371,58 @@ export class RecurringBookingsService {
     const matchingDates = nextMatchingDates(todayLocal, dayOfWeek, RECURRING_WINDOW_DAYS);
     if (matchingDates.length === 0) return blockedTimes;
 
-    // Build the set of exact UTC timestamps we need to check (ms-level match),
-    // and a reverse map from UTC ms → local slot time so we can flag the right
-    // slots when the DB returns collisions.
+    // Build the set of candidate grid-slot start ms we need to check. For each
+    // candidate block start we also include every grid slot inside the block
+    // (since the block can collide with the middle/end of an existing
+    // booking, not just the start).
+    const slotsNeeded = Math.max(1, Math.ceil(totalDuration / slotDurationMinutes));
     const msToSlotTime = new Map<number, string>();
-    const startIsoCandidates: number[] = [];
+    const candidates: number[] = [];
     for (const date of matchingDates) {
       for (const time of slotTimes) {
-        const ms = composeUtcFromLocal(date, time, timezone).getTime();
-        const rounded = Math.floor(ms / MINUTE_MS) * MINUTE_MS;
-        msToSlotTime.set(rounded, time);
-        startIsoCandidates.push(rounded);
+        const startMin = timeToMinutes(time);
+        for (let k = 0; k < slotsNeeded; k++) {
+          const gridMin = startMin + k * slotDurationMinutes;
+          const gridTime = minutesToTime(gridMin);
+          const ms = composeUtcFromLocal(date, gridTime, timezone).getTime();
+          const rounded = Math.floor(ms / MINUTE_MS) * MINUTE_MS;
+          if (!msToSlotTime.has(rounded)) {
+            msToSlotTime.set(rounded, gridTime);
+            candidates.push(rounded);
+          }
+        }
       }
     }
-    if (startIsoCandidates.length === 0) return blockedTimes;
+    if (candidates.length === 0) return blockedTimes;
 
-    const minMs = Math.min(...startIsoCandidates);
-    const maxMs = Math.max(...startIsoCandidates);
+    const minMs = Math.min(...candidates);
+    const maxMs = Math.max(...candidates);
 
     // Fetch every non-cancelled one-off booking (recurring_booking_id IS NULL)
-    // in the range, then intersect with our candidate set in memory.
+    // whose interval overlaps our candidate range. Use a conservative 4h
+    // window-lead so we catch bookings that started earlier but still run
+    // into one of our candidate grid slots.
+    const leadMs = 4 * 60 * 60_000;
     const { data, error } = await this.db
       .from('bookings')
-      .select('scheduled_at')
+      .select('scheduled_at, duration_minutes')
       .eq('barber_id', barberId)
       .is('recurring_booking_id', null)
-      .gte('scheduled_at', new Date(minMs).toISOString())
+      .gte('scheduled_at', new Date(minMs - leadMs).toISOString())
       .lte('scheduled_at', new Date(maxMs).toISOString())
       .neq('status', 'cancelled');
 
     if (error) throw new InternalServerErrorException('Failed to fetch one-off conflicts');
 
     for (const row of data ?? []) {
-      const ms = Math.floor(
-        new Date(row.scheduled_at as string).getTime() / MINUTE_MS,
-      ) * MINUTE_MS;
-      const match = msToSlotTime.get(ms);
-      if (match) blockedTimes.add(match);
+      const startMs = new Date(row.scheduled_at as string).getTime();
+      const duration = (row.duration_minutes as number | null) ?? slotDurationMinutes;
+      const endMs = startMs + duration * MINUTE_MS;
+      const startKey = Math.floor(startMs / MINUTE_MS) * MINUTE_MS;
+      for (let ms = startKey; ms < endMs; ms += slotDurationMinutes * MINUTE_MS) {
+        const match = msToSlotTime.get(ms);
+        if (match) blockedTimes.add(match);
+      }
     }
     return blockedTimes;
   }
@@ -344,13 +447,17 @@ export class RecurringBookingsService {
       throw new BadRequestException('This barber is not accepting recurring bookings.');
     }
 
-    const service = await this.fetchService(dto.barberId, dto.barberServiceId);
-    if (!service) {
-      throw new NotFoundException('Service not found or inactive for this barber');
+    const requestedIds = dto.services.map((s) => s.barberServiceId);
+    if (new Set(requestedIds).size !== requestedIds.length) {
+      throw new BadRequestException('Duplicate services are not allowed.');
     }
-    if (service.recurring_price_usd === null) {
-      throw new BadRequestException('This service does not support recurring bookings.');
+
+    const services = await this.fetchServices(dto.barberId, requestedIds);
+    if (services.length !== requestedIds.length) {
+      throw new NotFoundException('One or more services were not found or inactive for this barber');
     }
+    // Services without an explicit recurring_price_usd are billed at their
+    // regular_price_usd — same fallback rule as one-off bookings.
 
     const schedule = await this.fetchSchedule(dto.barberId, dto.dayOfWeek);
     if (!schedule || !schedule.recurring_enabled) {
@@ -366,13 +473,16 @@ export class RecurringBookingsService {
       throw new BadRequestException('This day has no bookable hours configured.');
     }
 
+    // Block size is slot-driven: services.length × schedule grid step.
+    const slotStep = schedule.slot_duration_minutes;
+    const totalDuration = services.length * slotStep;
     const minutes = timeToMinutes(dto.slotTime);
     const startM = timeToMinutes(window.start);
     const endM = timeToMinutes(window.end);
-    if (minutes < startM || minutes + schedule.slot_duration_minutes > endM) {
-      throw new BadRequestException('slotTime is outside the bookable window for this day.');
+    if (minutes < startM || minutes + totalDuration > endM) {
+      throw new BadRequestException('The selected services do not fit the bookable window for this day.');
     }
-    if ((minutes - startM) % schedule.slot_duration_minutes !== 0) {
+    if ((minutes - startM) % slotStep !== 0) {
       throw new BadRequestException("slotTime does not align to the day's slot grid.");
     }
 
@@ -381,22 +491,42 @@ export class RecurringBookingsService {
       schedule.recurring_extra_charge_usd !== undefined
         ? Number(schedule.recurring_extra_charge_usd)
         : 0;
+
+    // Extra charge is per-occurrence, not per-service. Distribute it onto the
+    // first service's slot_type_surcharge_usd so the aggregate matches
+    // `recurring_bookings.price_usd`.
+    const perServicePricing = dto.services.map((selection, idx) => {
+      const svc = services.find((s) => s.id === selection.barberServiceId)!;
+      const basePrice = this.recurringBasePrice(svc);
+      const surcharge = idx === 0 ? extraCharge : 0;
+      const totalPrice = Number((basePrice + surcharge).toFixed(2));
+      return {
+        selection,
+        service: svc,
+        basePrice,
+        surcharge,
+        totalPrice,
+      };
+    });
+
     const priceUsd = Number(
-      (Number(service.recurring_price_usd) + extraCharge).toFixed(2),
+      perServicePricing.reduce((acc, p) => acc + p.totalPrice, 0).toFixed(2),
     );
 
     const normalisedSlotTime = `${dto.slotTime}:00`;
+    const primary = services.find((s) => s.id === dto.services[0].barberServiceId)!;
 
     const { data: inserted, error } = await this.db
       .from('recurring_bookings')
       .insert({
         client_id: clientAuthId,
         barber_id: dto.barberId,
-        barber_service_id: dto.barberServiceId,
+        barber_service_id: primary.id,
         day_of_week: dto.dayOfWeek,
         slot_time: normalisedSlotTime,
         frequency: dto.frequency,
         price_usd: priceUsd,
+        duration_minutes: totalDuration,
         status: 'pending_barber_approval',
         is_renewal: false,
       })
@@ -411,6 +541,31 @@ export class RecurringBookingsService {
     }
 
     const insertedRow = inserted as RecurringRow;
+
+    // duration_minutes on the snapshot is the SLOT share (drives math). The
+    // service's nominal duration is fetched fresh from barber_services when
+    // we render the response.
+    const childRows = perServicePricing.map((p, idx) => ({
+      recurring_booking_id: insertedRow.id,
+      barber_service_id: p.service.id,
+      service_type: p.service.service_type,
+      booking_type: p.selection.bookingType,
+      duration_minutes: slotStep,
+      base_price_usd: p.basePrice,
+      slot_type_surcharge_usd: p.surcharge,
+      price_usd: p.totalPrice,
+      sort_order: idx,
+    }));
+
+    const { error: childError } = await this.db
+      .from('recurring_booking_services')
+      .insert(childRows);
+
+    if (childError) {
+      await this.db.from('recurring_bookings').delete().eq('id', insertedRow.id);
+      throw new InternalServerErrorException('Failed to create recurring booking services');
+    }
+
     void this.notificationsService.createAndSendNotification({
       recipientId: insertedRow.barber_id,
       recipientType: 'barber',
@@ -846,16 +1001,36 @@ export class RecurringBookingsService {
       throw new ConflictException('A renewal for this booking is already in progress.');
     }
 
-    // Re-validate barber/service/day eligibility at renewal time
+    // Re-validate barber/day eligibility at renewal time
     const barber = await this.fetchBarber(original.barber_id);
     if (!barber.recurring_enabled) {
       throw new BadRequestException('This barber is no longer accepting recurring bookings.');
     }
 
-    const service = await this.fetchService(original.barber_id, original.barber_service_id);
-    if (!service || service.recurring_price_usd === null) {
-      throw new BadRequestException('This service no longer supports recurring bookings.');
+    const originalServices = await this.fetchRecurringBookingServices(originalId);
+    if (originalServices.length === 0) {
+      // Legacy single-service rows pre-migration: fall back to barber_service_id
+      originalServices.push({
+        barber_service_id: original.barber_service_id,
+        service_type: 'other',
+        booking_type: 'regular',
+        duration_minutes: 0,
+        base_price_usd: 0,
+        slot_type_surcharge_usd: 0,
+        price_usd: 0,
+        sort_order: 0,
+      });
     }
+
+    const currentServices = await this.fetchServices(
+      original.barber_id,
+      originalServices.map((s) => s.barber_service_id),
+    );
+    if (currentServices.length !== originalServices.length) {
+      throw new BadRequestException('One or more services on the original booking are no longer active.');
+    }
+    // Same fallback rule on renewal: missing recurring_price_usd → priced
+    // at the service's regular_price_usd.
 
     const schedule = await this.fetchSchedule(original.barber_id, original.day_of_week);
     if (!schedule || !schedule.recurring_enabled) {
@@ -871,8 +1046,31 @@ export class RecurringBookingsService {
       schedule.recurring_extra_charge_usd !== undefined
         ? Number(schedule.recurring_extra_charge_usd)
         : 0;
+
+    // Rebuild pricing from current service prices (prices may have changed
+    // since the original was created). Booking type is preserved per service.
+    const currentById = new Map(currentServices.map((s) => [s.id, s]));
+    const perServicePricing = originalServices.map((orig, idx) => {
+      const svc = currentById.get(orig.barber_service_id)!;
+      const basePrice = this.recurringBasePrice(svc);
+      const surcharge = idx === 0 ? extraCharge : 0;
+      const totalPrice = Number((basePrice + surcharge).toFixed(2));
+      return {
+        service: svc,
+        bookingType: orig.booking_type,
+        sortOrder: orig.sort_order,
+        basePrice,
+        surcharge,
+        totalPrice,
+      };
+    });
+
+    // Slot-driven block size — same rule as createRecurringBooking. Re-derive
+    // from the current schedule's grid in case it changed since the original.
+    const slotStep = schedule.slot_duration_minutes;
+    const totalDuration = perServicePricing.length * slotStep;
     const priceUsd = Number(
-      (Number(service.recurring_price_usd) + extraCharge).toFixed(2),
+      perServicePricing.reduce((acc, p) => acc + p.totalPrice, 0).toFixed(2),
     );
 
     const { data: inserted, error } = await this.db
@@ -885,6 +1083,7 @@ export class RecurringBookingsService {
         slot_time: original.slot_time,
         frequency: original.frequency,
         price_usd: priceUsd,
+        duration_minutes: totalDuration,
         status: 'pending_barber_approval',
         is_renewal: true,
         original_recurring_booking_id: originalId,
@@ -900,6 +1099,28 @@ export class RecurringBookingsService {
     }
 
     const insertedRow = inserted as RecurringRow;
+
+    const childRows = perServicePricing.map((p) => ({
+      recurring_booking_id: insertedRow.id,
+      barber_service_id: p.service.id,
+      service_type: p.service.service_type,
+      booking_type: p.bookingType,
+      duration_minutes: slotStep,
+      base_price_usd: p.basePrice,
+      slot_type_surcharge_usd: p.surcharge,
+      price_usd: p.totalPrice,
+      sort_order: p.sortOrder,
+    }));
+
+    const { error: childError } = await this.db
+      .from('recurring_booking_services')
+      .insert(childRows);
+
+    if (childError) {
+      await this.db.from('recurring_bookings').delete().eq('id', insertedRow.id);
+      throw new InternalServerErrorException('Failed to clone recurring booking services');
+    }
+
     void this.notificationsService.createAndSendNotification({
       recipientId: insertedRow.barber_id,
       recipientType: 'barber',
@@ -909,6 +1130,21 @@ export class RecurringBookingsService {
     });
 
     return { recurringBooking: await this.buildRecurringBookingDto(insertedRow) };
+  }
+
+  private async fetchRecurringBookingServices(
+    recurringBookingId: string,
+  ): Promise<RecurringBookingServiceSnapshot[]> {
+    const { data, error } = await this.db
+      .from('recurring_booking_services')
+      .select(
+        'barber_service_id, service_type, booking_type, duration_minutes, base_price_usd, slot_type_surcharge_usd, price_usd, sort_order',
+      )
+      .eq('recurring_booking_id', recurringBookingId)
+      .order('sort_order', { ascending: true });
+
+    if (error) throw new InternalServerErrorException('Failed to fetch recurring booking services');
+    return (data ?? []) as RecurringBookingServiceSnapshot[];
   }
 
   // ────────────────────────────────────────────────────────────
@@ -1187,14 +1423,28 @@ export class RecurringBookingsService {
     return dayOption === requested;
   }
 
+  // A service may not have an explicit recurring_price_usd configured. In
+  // that case we fall back to its regular_price_usd so the recurring slot
+  // remains bookable — same policy used for missing after_hours / day_off
+  // pricing on one-off bookings.
+  private recurringBasePrice(s: BarberServiceRow): number {
+    return Number(s.recurring_price_usd ?? s.regular_price_usd);
+  }
+
   // Lightweight mapping from a recurring_bookings row + related barber/service/client
   // lookups into the public RecurringBookingDto. Used by R6, R7, R11, R12.
   protected async buildRecurringBookingDto(row: RecurringRow): Promise<RecurringBookingDto> {
-    const [barberName, clientName, serviceLite] = await Promise.all([
+    const [barberName, clientName, serviceLite, childServices] = await Promise.all([
       this.fetchBarberName(row.barber_id),
       this.fetchClientName(row.client_id),
       this.fetchServiceLite(row.barber_service_id),
+      this.buildRecurringServiceList(row.id),
     ]);
+
+    const totalDurationMinutes =
+      row.duration_minutes ??
+      childServices.reduce((acc, s) => acc + s.durationMinutes, 0) ??
+      serviceLite.durationMinutes;
 
     return {
       id: row.id,
@@ -1209,6 +1459,8 @@ export class RecurringBookingsService {
       pauseEndDate: row.pause_end_date,
       windowStartDate: row.window_start_date,
       service: serviceLite,
+      services: childServices,
+      totalDurationMinutes,
       barber: { id: row.barber_id, name: barberName },
       client: { id: row.client_id, name: clientName },
       createdAt: new Date(row.created_at).toISOString(),
@@ -1222,6 +1474,45 @@ export class RecurringBookingsService {
       cancelledAt: row.cancelled_at ? new Date(row.cancelled_at).toISOString() : null,
       cancelledBy: (row.cancelled_by as 'client' | 'barber' | null) ?? null,
     };
+  }
+
+  private async buildRecurringServiceList(
+    recurringBookingId: string,
+  ): Promise<RecurringBookingServiceDto[]> {
+    const rows = await this.fetchRecurringBookingServices(recurringBookingId);
+    if (rows.length === 0) return [];
+
+    // recurring_booking_services.duration_minutes is the slot share (math).
+    // For display we surface the service's real duration from barber_services.
+    const serviceIds = rows.map((r) => r.barber_service_id);
+    const { data, error } = await this.db
+      .from('barber_services')
+      .select('id, name, duration_minutes')
+      .in('id', serviceIds);
+    if (error) throw new InternalServerErrorException('Failed to fetch service names');
+    const serviceById = new Map<string, { name: string; duration_minutes: number }>();
+    for (const s of (data ?? []) as {
+      id: string;
+      name: string;
+      duration_minutes: number;
+    }[]) {
+      serviceById.set(s.id, { name: s.name, duration_minutes: s.duration_minutes });
+    }
+
+    let offset = 0;
+    return rows.map((r) => {
+      const startOffsetMinutes = offset;
+      offset += r.duration_minutes;
+      const svc = serviceById.get(r.barber_service_id);
+      return {
+        id: r.barber_service_id,
+        name: svc?.name ?? 'Service',
+        durationMinutes: svc?.duration_minutes ?? r.duration_minutes,
+        bookingType: r.booking_type as BookingTypeDto,
+        startOffsetMinutes,
+        priceUsd: Number(r.price_usd),
+      };
+    });
   }
 
   private async fetchBarberName(barberId: string): Promise<string> {
@@ -1268,6 +1559,7 @@ export interface RecurringRow {
   slot_time: string;
   frequency: 'weekly' | 'biweekly';
   price_usd: string | number;
+  duration_minutes: number | null;
   status: string;
   is_renewal: boolean;
   original_recurring_booking_id: string | null;

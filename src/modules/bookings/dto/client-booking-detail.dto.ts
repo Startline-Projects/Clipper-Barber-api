@@ -8,9 +8,19 @@ export class ClientBookingBarberSummaryDto {
   @ApiProperty({ nullable: true, type: String }) profilePhotoUrl: string | null;
 }
 
+export class ClientBookingServicePricingDto {
+  @ApiProperty() basePrice: number;
+  @ApiProperty() additionalCost: number;
+  @ApiProperty() totalPrice: number;
+}
+
 export class ClientBookingServiceSummaryDto {
+  @ApiProperty() id: string;
   @ApiProperty() name: string;
   @ApiProperty() durationMinutes: number;
+  @ApiProperty({ enum: BookingTypeDto }) bookingType: BookingTypeDto;
+  @ApiProperty() startOffsetMinutes: number;
+  @ApiProperty({ type: ClientBookingServicePricingDto }) pricing: ClientBookingServicePricingDto;
 }
 
 export class ClientBookingDetailPricingDto {
@@ -29,9 +39,9 @@ export class ClientBookingReviewDto {
 export class ClientBookingDetailDto {
   @ApiProperty() id: string;
   @ApiProperty({ type: ClientBookingBarberSummaryDto }) barber: ClientBookingBarberSummaryDto;
-  @ApiProperty({ type: ClientBookingServiceSummaryDto }) service: ClientBookingServiceSummaryDto;
+  @ApiProperty({ type: [ClientBookingServiceSummaryDto] }) services: ClientBookingServiceSummaryDto[];
   @ApiProperty() scheduledAt: string;
-  @ApiProperty({ enum: BookingTypeDto }) bookingType: BookingTypeDto;
+  @ApiProperty() totalDurationMinutes: number;
   @ApiProperty() totalPrice: number;
   @ApiProperty({ enum: BookingStatusDto }) status: BookingStatusDto;
   @ApiProperty({ nullable: true, type: String }) cancelledAt: string | null;

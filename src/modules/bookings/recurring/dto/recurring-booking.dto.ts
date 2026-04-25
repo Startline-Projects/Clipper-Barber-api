@@ -13,6 +13,16 @@ export class RecurringBookingServiceLiteDto {
   @ApiProperty() durationMinutes: number;
 }
 
+export class RecurringBookingServiceDto {
+  @ApiProperty() id: string;
+  @ApiProperty() name: string;
+  @ApiProperty() durationMinutes: number;
+  @ApiProperty({ example: 'regular', enum: ['regular', 'after_hours', 'day_off'] })
+  bookingType: 'regular' | 'after_hours' | 'day_off';
+  @ApiProperty() startOffsetMinutes: number;
+  @ApiProperty() priceUsd: number;
+}
+
 export class RecurringBookingPartyDto {
   @ApiProperty() id: string;
   @ApiProperty() name: string;
@@ -47,6 +57,12 @@ export class RecurringBookingDto {
 
   @ApiProperty({ type: RecurringBookingServiceLiteDto })
   service: RecurringBookingServiceLiteDto;
+
+  @ApiProperty({ type: [RecurringBookingServiceDto] })
+  services: RecurringBookingServiceDto[];
+
+  @ApiProperty({ example: 60, description: 'Summed duration across all services.' })
+  totalDurationMinutes: number;
 
   @ApiProperty({ type: RecurringBookingPartyDto })
   barber: RecurringBookingPartyDto;

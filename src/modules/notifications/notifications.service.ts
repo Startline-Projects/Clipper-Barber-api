@@ -41,8 +41,15 @@ export interface CreateNotificationInput {
   type: NotificationTypeDto;
   bookingId?: string | null;
   recurringBookingId?: string | null;
+  conversationId?: string | null;
+  messageId?: string | null;
+  // Plain-text body of the chat message, used verbatim (truncated) as the
+  // notification body for NEW_MESSAGE. Ignored for booking / recurring types.
+  messageBody?: string;
   override?: Partial<NotificationFormatSeed>;
 }
+
+const CHAT_PREVIEW_MAX_CHARS = 120;
 
 export interface NotificationFormatSeed {
   actorName: string;
@@ -77,6 +84,8 @@ const TITLE_BY_TYPE: Record<NotificationTypeDto, string> = {
   [NotificationTypeDto.RECURRING_ACCEPTED]: 'Recurring Accepted',
   [NotificationTypeDto.RECURRING_REFUSED]: 'Recurring Refused',
   [NotificationTypeDto.RECURRING_EXPIRING]: 'Recurring Expiring',
+  // NEW_MESSAGE builds its title dynamically from the sender's name.
+  [NotificationTypeDto.NEW_MESSAGE]: 'New Message',
 };
 
 interface NotificationRow {
@@ -88,6 +97,8 @@ interface NotificationRow {
   is_read: boolean;
   booking_id: string | null;
   recurring_booking_id: string | null;
+  conversation_id: string | null;
+  message_id: string | null;
   created_at: string;
 }
 
@@ -266,7 +277,7 @@ export class NotificationsService {
     const { data, error } = await this.db
       .from('notifications')
       .select(
-        'id, type, title, body, data, is_read, booking_id, recurring_booking_id, created_at',
+        'id, type, title, body, data, is_read, booking_id, recurring_booking_id, conversation_id, message_id, created_at',
       )
       .eq('recipient_id', recipientId)
       .eq('recipient_type', recipientType)
@@ -355,6 +366,13 @@ export class NotificationsService {
   // because of a push failure.
   public async createAndSendNotification(input: CreateNotificationInput): Promise<void> {
     try {
+      // Chat pushes don't run through the booking-centric format pipeline
+      // and bypass the barber category toggles (chat is always on).
+      if (input.type === NotificationTypeDto.NEW_MESSAGE) {
+        await this.createAndSendChatNotification(input);
+        return;
+      }
+
       if (!this.isRecipientValidForType(input.type, input.recipientType)) return;
 
       if (input.recipientType === 'barber') {
@@ -381,6 +399,58 @@ export class NotificationsService {
         err as Error,
       );
     }
+  }
+
+  private async createAndSendChatNotification(
+    input: CreateNotificationInput,
+  ): Promise<void> {
+    if (!input.conversationId || !input.messageId || !input.messageBody) {
+      this.logger.warn('NEW_MESSAGE notification missing conversation/message context');
+      return;
+    }
+
+    const senderName =
+      input.recipientType === 'barber'
+        ? await this.fetchClientName(input.senderId)
+        : (await this.fetchBarberDisplay(input.senderId)).name;
+
+    const title = `New message from ${senderName}`;
+    const body = this.truncate(input.messageBody, CHAT_PREVIEW_MAX_CHARS);
+
+    const { data, error } = await this.db
+      .from('notifications')
+      .insert({
+        recipient_id: input.recipientId,
+        recipient_type: input.recipientType,
+        sender_id: input.senderId,
+        conversation_id: input.conversationId,
+        message_id: input.messageId,
+        type: input.type,
+        title,
+        body,
+        data: {},
+      })
+      .select('id')
+      .single();
+
+    if (error || !data) {
+      this.logger.error(
+        `Failed to persist chat notification: ${error?.message ?? 'unknown'}`,
+      );
+      return;
+    }
+
+    await this.dispatchPush(input.recipientId, title, body, {
+      notificationId: data.id as string,
+      type: input.type,
+      conversationId: input.conversationId,
+      messageId: input.messageId,
+    });
+  }
+
+  private truncate(text: string, max: number): string {
+    const trimmed = text.trim();
+    return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max - 1)}…`;
   }
 
   private isRecipientValidForType(
@@ -653,6 +723,8 @@ export class NotificationsService {
       isRead: r.is_read,
       bookingId: r.booking_id,
       recurringBookingId: r.recurring_booking_id,
+      conversationId: r.conversation_id,
+      messageId: r.message_id,
       createdAt: new Date(r.created_at).toISOString(),
     };
   }

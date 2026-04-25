@@ -1,0 +1,1056 @@
+{
+  "info": {
+    "name": "Multi-Service Bookings API",
+    "_postman_id": "multi-service-bookings-collection",
+    "description": "End-to-end test suite for the multi-service booking feature.\n\nCovers ONLY the changes introduced by this branch:\n- `GET /bookings/availability` now takes `serviceIds` (array) and returns `services[]` + `totalDurationMinutes`. Slot availability accounts for consecutive-slot blocks.\n- `POST /bookings/preview` and `POST /bookings/confirm` now take `services: [{ barberServiceId, bookingType }]` (max 4). Each service carries its own bookingType so blocks can span regular + after-hours.\n- `GET /client/bookings/:id` now returns a `services[]` array with per-service pricing.\n- `GET /client/barbers/:barberId/recurring-slots` takes `serviceIds` (array) and enforces the combined block fits.\n- `POST /client/recurring-bookings` takes `services: [...]`; `recurring_booking_services` children are written.\n\n## Required test data\nBefore running, pick (or create) TWO active `barber_services` rows for your barber that both have:\n- `regular_price_usd` set\n- `recurring_price_usd` set (for the recurring tests)\n\nOptionally: a third service with `after_hours_price_usd` set (for the boundary-crossing test).\n\nIdeal barber schedule for Tuesday (dayOfWeek=2):\n- `regular_start_time = 09:00`, `regular_end_time = 17:00`, `slot_duration_minutes = 30`, `is_working = true`\n- `after_hours_enabled = true`, `after_hours_start = 17:00`, `after_hours_end = 20:00`\n- `recurring_enabled = true`, `recurring_frequency = weekly`\n\n## Setup\n1. Set `barberEmail` / `barberPassword` / `clientEmail` / `clientPassword` collection variables.\n2. Run the **1. Auth** folder in order — tokens and ids auto-populate.\n3. Run **2. Prep** once — captures `serviceAId` + `serviceBId` from the barber's active services.\n4. Run the test folders in order. Each folder's happy-path items must run before its edge cases that depend on state (e.g. Confirm must run before Overlap).\n\n## Variables\n| Variable | Set by |\n|---|---|\n| `baseUrl` | Collection variable (default http://localhost:3001) |\n| `barberToken` / `clientToken` | Login scripts |\n| `barberId` / `clientId` | Login scripts |\n| `serviceAId` / `serviceBId` / `serviceAfterHoursId` | Prep — first/second/third active services |\n| `bookingDate` | Prep — next Tuesday in YYYY-MM-DD |\n| `createdBookingId` | Confirm (happy) |\n| `recurringId` | Recurring Create (happy) |\n\n## Notes\n- All tests assume `dayOfWeek = 2` (Tuesday). Change `dayOfWeek` + `bookingDate` together if needed.\n- The boundary-crossing test (regular→after_hours) is skipped unless `serviceAfterHoursId` is set and the schedule has both windows configured.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3001" },
+    { "key": "barberEmail", "value": "barber@example.com" },
+    { "key": "barberPassword", "value": "YourPassword123!" },
+    { "key": "clientEmail", "value": "client@example.com" },
+    { "key": "clientPassword", "value": "YourPassword123!" },
+    { "key": "barberToken", "value": "" },
+    { "key": "clientToken", "value": "" },
+    { "key": "barberId", "value": "" },
+    { "key": "clientId", "value": "" },
+    { "key": "serviceAId", "value": "" },
+    { "key": "serviceBId", "value": "" },
+    { "key": "serviceAfterHoursId", "value": "" },
+    { "key": "dayOfWeek", "value": "2" },
+    { "key": "bookingDate", "value": "" },
+    { "key": "slotTime", "value": "10:00" },
+    { "key": "boundarySlotTime", "value": "16:30" },
+    { "key": "createdBookingId", "value": "" },
+    { "key": "recurringId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Auth",
+      "item": [
+        {
+          "name": "[AUTH] Login as Barber",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('accessToken returned', () => pm.expect(json.accessToken).to.be.a('string'));",
+                  "pm.collectionVariables.set('barberToken', json.accessToken);",
+                  "pm.collectionVariables.set('barberId', json.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{barberEmail}}\",\n  \"password\": \"{{barberPassword}}\",\n  \"role\": \"barber\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            }
+          }
+        },
+        {
+          "name": "[AUTH] Login as Client",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('accessToken returned', () => pm.expect(json.accessToken).to.be.a('string'));",
+                  "pm.collectionVariables.set('clientToken', json.accessToken);",
+                  "pm.collectionVariables.set('clientId', json.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{clientEmail}}\",\n  \"password\": \"{{clientPassword}}\",\n  \"role\": \"client\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Prep",
+      "item": [
+        {
+          "name": "[PREP] Capture 2 active services + compute next Tuesday",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "const services = (json.services || []).filter(s => s.isActive !== false);",
+                  "pm.test('has at least 2 active services', () => pm.expect(services.length).to.be.gte(2));",
+                  "pm.collectionVariables.set('serviceAId', services[0].id);",
+                  "pm.collectionVariables.set('serviceBId', services[1].id);",
+                  "",
+                  "// Find next matching dayOfWeek in YYYY-MM-DD",
+                  "const dow = Number(pm.collectionVariables.get('dayOfWeek'));",
+                  "const today = new Date();",
+                  "const delta = (dow - today.getDay() + 7) % 7 || 7;",
+                  "const target = new Date(today.getTime() + delta * 86400000);",
+                  "const y = target.getFullYear();",
+                  "const m = String(target.getMonth() + 1).padStart(2, '0');",
+                  "const d = String(target.getDate()).padStart(2, '0');",
+                  "pm.collectionVariables.set('bookingDate', `${y}-${m}-${d}`);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{barberToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barber/services",
+              "host": ["{{baseUrl}}"],
+              "path": ["barber", "services"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Availability",
+      "item": [
+        {
+          "name": "[AVAIL] 1 service — happy path (backwards compat)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('services[] length 1', () => pm.expect(json.services).to.have.lengthOf(1));",
+                  "pm.test('totalDurationMinutes equals the single service', () => pm.expect(json.totalDurationMinutes).to.equal(json.services[0].durationMinutes));",
+                  "pm.test('days[] is not empty', () => pm.expect(json.days.length).to.be.greaterThan(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/availability?serviceIds={{serviceAId}}&startDate={{bookingDate}}&endDate={{bookingDate}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "availability"],
+              "query": [
+                { "key": "serviceIds", "value": "{{serviceAId}}" },
+                { "key": "startDate", "value": "{{bookingDate}}" },
+                { "key": "endDate", "value": "{{bookingDate}}" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "[AVAIL] 2 services — happy path",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('services[] length 2', () => pm.expect(json.services).to.have.lengthOf(2));",
+                  "pm.test('totalDurationMinutes = sum of durations', () => pm.expect(json.totalDurationMinutes).to.equal(json.services[0].durationMinutes + json.services[1].durationMinutes));",
+                  "",
+                  "// Price per slot should be sum of service regular prices",
+                  "const day = json.days.find(d => d.slots.regular.length > 0);",
+                  "if (day) {",
+                  "  const expected = json.services[0].regularPrice + json.services[1].regularPrice;",
+                  "  const slotPrice = day.slots.regular[0].price;",
+                  "  pm.test('slot price == sum of service regular prices', () => pm.expect(slotPrice).to.be.closeTo(expected, 0.01));",
+                  "  pm.test('slot.endTime - slot.time equals totalDuration', () => {",
+                  "    const toMin = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };",
+                  "    pm.expect(toMin(day.slots.regular[0].endTime) - toMin(day.slots.regular[0].time)).to.equal(json.totalDurationMinutes);",
+                  "  });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/availability?serviceIds={{serviceAId}},{{serviceBId}}&startDate={{bookingDate}}&endDate={{bookingDate}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "availability"],
+              "query": [
+                { "key": "serviceIds", "value": "{{serviceAId}},{{serviceBId}}" },
+                { "key": "startDate", "value": "{{bookingDate}}" },
+                { "key": "endDate", "value": "{{bookingDate}}" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "[AVAIL] end-of-window trimming (2 services)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "const day = json.days.find(d => d.slots.regular.length > 0);",
+                  "if (day) {",
+                  "  const lastSlot = day.slots.regular[day.slots.regular.length - 1];",
+                  "  const toMin = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };",
+                  "  // lastSlot.endTime must be inside the working window — the block must fit",
+                  "  pm.test('last emitted slot has room for the full block', () => {",
+                  "    pm.expect(toMin(lastSlot.endTime) - toMin(lastSlot.time)).to.equal(json.totalDurationMinutes);",
+                  "  });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/availability?serviceIds={{serviceAId}},{{serviceBId}}&startDate={{bookingDate}}&endDate={{bookingDate}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "availability"],
+              "query": [
+                { "key": "serviceIds", "value": "{{serviceAId}},{{serviceBId}}" },
+                { "key": "startDate", "value": "{{bookingDate}}" },
+                { "key": "endDate", "value": "{{bookingDate}}" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "[AVAIL] duplicate serviceIds — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 400', () => pm.response.to.have.status(400));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/availability?serviceIds={{serviceAId}},{{serviceAId}}&startDate={{bookingDate}}&endDate={{bookingDate}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "availability"],
+              "query": [
+                { "key": "serviceIds", "value": "{{serviceAId}},{{serviceAId}}" },
+                { "key": "startDate", "value": "{{bookingDate}}" },
+                { "key": "endDate", "value": "{{bookingDate}}" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "[AVAIL] no serviceIds — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 400', () => pm.response.to.have.status(400));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/availability?startDate={{bookingDate}}&endDate={{bookingDate}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "availability"],
+              "query": [
+                { "key": "startDate", "value": "{{bookingDate}}" },
+                { "key": "endDate", "value": "{{bookingDate}}" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "[AVAIL] >4 serviceIds — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 400', () => pm.response.to.have.status(400));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/availability?serviceIds={{serviceAId}},{{serviceBId}},11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222,33333333-3333-3333-3333-333333333333&startDate={{bookingDate}}&endDate={{bookingDate}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "availability"],
+              "query": [
+                {
+                  "key": "serviceIds",
+                  "value": "{{serviceAId}},{{serviceBId}},11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222,33333333-3333-3333-3333-333333333333"
+                },
+                { "key": "startDate", "value": "{{bookingDate}}" },
+                { "key": "endDate", "value": "{{bookingDate}}" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "[AVAIL] invalid UUID — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 400', () => pm.response.to.have.status(400));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/availability?serviceIds=not-a-uuid&startDate={{bookingDate}}&endDate={{bookingDate}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "availability"],
+              "query": [
+                { "key": "serviceIds", "value": "not-a-uuid" },
+                { "key": "startDate", "value": "{{bookingDate}}" },
+                { "key": "endDate", "value": "{{bookingDate}}" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "[AVAIL] non-existent service UUID — 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 404', () => pm.response.to.have.status(404));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/barbers/{{barberId}}/availability?serviceIds=00000000-0000-0000-0000-000000000000&startDate={{bookingDate}}&endDate={{bookingDate}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["barbers", "{{barberId}}", "availability"],
+              "query": [
+                { "key": "serviceIds", "value": "00000000-0000-0000-0000-000000000000" },
+                { "key": "startDate", "value": "{{bookingDate}}" },
+                { "key": "endDate", "value": "{{bookingDate}}" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Preview",
+      "item": [
+        {
+          "name": "[PREVIEW] 1 service regular — happy path",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json().preview;",
+                  "pm.test('services[] length 1', () => pm.expect(json.services).to.have.lengthOf(1));",
+                  "pm.test('startOffsetMinutes = 0 on first service', () => pm.expect(json.services[0].startOffsetMinutes).to.equal(0));",
+                  "pm.test('totalDurationMinutes equals service duration', () => pm.expect(json.totalDurationMinutes).to.equal(json.services[0].durationMinutes));",
+                  "pm.test('pricing.totalPrice equals service pricing.totalPrice', () => pm.expect(json.pricing.totalPrice).to.be.closeTo(json.services[0].pricing.totalPrice, 0.01));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"services\": [\n    { \"barberServiceId\": \"{{serviceAId}}\", \"bookingType\": \"regular\" }\n  ],\n  \"date\": \"{{bookingDate}}\",\n  \"slotTime\": \"{{slotTime}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bookings/preview",
+              "host": ["{{baseUrl}}"],
+              "path": ["bookings", "preview"]
+            }
+          }
+        },
+        {
+          "name": "[PREVIEW] 2 services regular — sum prices + durations",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json().preview;",
+                  "pm.test('services[] length 2', () => pm.expect(json.services).to.have.lengthOf(2));",
+                  "const a = json.services[0], b = json.services[1];",
+                  "pm.test('first startOffsetMinutes = 0', () => pm.expect(a.startOffsetMinutes).to.equal(0));",
+                  "pm.test('second startOffsetMinutes = first duration', () => pm.expect(b.startOffsetMinutes).to.equal(a.durationMinutes));",
+                  "pm.test('totalDurationMinutes = sum of durations', () => pm.expect(json.totalDurationMinutes).to.equal(a.durationMinutes + b.durationMinutes));",
+                  "pm.test('pricing.totalPrice = sum of per-service totals', () => pm.expect(json.pricing.totalPrice).to.be.closeTo(a.pricing.totalPrice + b.pricing.totalPrice, 0.01));",
+                  "pm.test('each service priced under its own bookingType', () => {",
+                  "  pm.expect(a.bookingType).to.equal('regular');",
+                  "  pm.expect(b.bookingType).to.equal('regular');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"services\": [\n    { \"barberServiceId\": \"{{serviceAId}}\", \"bookingType\": \"regular\" },\n    { \"barberServiceId\": \"{{serviceBId}}\", \"bookingType\": \"regular\" }\n  ],\n  \"date\": \"{{bookingDate}}\",\n  \"slotTime\": \"{{slotTime}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bookings/preview",
+              "host": ["{{baseUrl}}"],
+              "path": ["bookings", "preview"]
+            }
+          }
+        },
+        {
+          "name": "[PREVIEW] mixed regular + after_hours at boundary (optional)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('serviceAfterHoursId')) {",
+                  "  console.log('Skipping boundary-crossing preview — serviceAfterHoursId is not set.');",
+                  "  postman.setNextRequest(null);",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json().preview;",
+                  "pm.test('services[] length 2', () => pm.expect(json.services).to.have.lengthOf(2));",
+                  "pm.test('first bookingType is regular', () => pm.expect(json.services[0].bookingType).to.equal('regular'));",
+                  "pm.test('second bookingType is after_hours', () => pm.expect(json.services[1].bookingType).to.equal('after_hours'));",
+                  "pm.test('second service priced at its after_hours rate', () => pm.expect(json.services[1].pricing.totalPrice).to.be.greaterThanOrEqual(json.services[1].pricing.basePrice));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"services\": [\n    { \"barberServiceId\": \"{{serviceAId}}\", \"bookingType\": \"regular\" },\n    { \"barberServiceId\": \"{{serviceAfterHoursId}}\", \"bookingType\": \"after_hours\" }\n  ],\n  \"date\": \"{{bookingDate}}\",\n  \"slotTime\": \"{{boundarySlotTime}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bookings/preview",
+              "host": ["{{baseUrl}}"],
+              "path": ["bookings", "preview"]
+            }
+          }
+        },
+        {
+          "name": "[PREVIEW] after_hours service inside regular-only window — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 400', () => pm.response.to.have.status(400));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"services\": [\n    { \"barberServiceId\": \"{{serviceAId}}\", \"bookingType\": \"after_hours\" }\n  ],\n  \"date\": \"{{bookingDate}}\",\n  \"slotTime\": \"{{slotTime}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bookings/preview",
+              "host": ["{{baseUrl}}"],
+              "path": ["bookings", "preview"]
+            }
+          }
+        },
+        {
+          "name": "[PREVIEW] duplicate services in request — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 400', () => pm.response.to.have.status(400));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"services\": [\n    { \"barberServiceId\": \"{{serviceAId}}\", \"bookingType\": \"regular\" },\n    { \"barberServiceId\": \"{{serviceAId}}\", \"bookingType\": \"regular\" }\n  ],\n  \"date\": \"{{bookingDate}}\",\n  \"slotTime\": \"{{slotTime}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bookings/preview",
+              "host": ["{{baseUrl}}"],
+              "path": ["bookings", "preview"]
+            }
+          }
+        },
+        {
+          "name": "[PREVIEW] empty services array — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 400', () => pm.response.to.have.status(400));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"services\": [],\n  \"date\": \"{{bookingDate}}\",\n  \"slotTime\": \"{{slotTime}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bookings/preview",
+              "host": ["{{baseUrl}}"],
+              "path": ["bookings", "preview"]
+            }
+          }
+        },
+        {
+          "name": "[PREVIEW] block overflows window end — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 400', () => pm.response.to.have.status(400));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"services\": [\n    { \"barberServiceId\": \"{{serviceAId}}\", \"bookingType\": \"regular\" },\n    { \"barberServiceId\": \"{{serviceBId}}\", \"bookingType\": \"regular\" }\n  ],\n  \"date\": \"{{bookingDate}}\",\n  \"slotTime\": \"16:45\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bookings/preview",
+              "host": ["{{baseUrl}}"],
+              "path": ["bookings", "preview"]
+            }
+          }
+        },
+        {
+          "name": "[PREVIEW] malformed slotTime — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 400', () => pm.response.to.have.status(400));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"services\": [\n    { \"barberServiceId\": \"{{serviceAId}}\", \"bookingType\": \"regular\" }\n  ],\n  \"date\": \"{{bookingDate}}\",\n  \"slotTime\": \"9am\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bookings/preview",
+              "host": ["{{baseUrl}}"],
+              "path": ["bookings", "preview"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Confirm",
+      "item": [
+        {
+          "name": "[CONFIRM] 2 services — happy path",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json().booking;",
+                  "pm.collectionVariables.set('createdBookingId', json.id);",
+                  "pm.test('services[] length 2', () => pm.expect(json.services).to.have.lengthOf(2));",
+                  "pm.test('totalDurationMinutes = sum', () => pm.expect(json.totalDurationMinutes).to.equal(json.services[0].durationMinutes + json.services[1].durationMinutes));",
+                  "pm.test('pricing.totalPrice = sum of per-service totals', () => pm.expect(json.pricing.totalPrice).to.be.closeTo(json.services[0].pricing.totalPrice + json.services[1].pricing.totalPrice, 0.01));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"services\": [\n    { \"barberServiceId\": \"{{serviceAId}}\", \"bookingType\": \"regular\" },\n    { \"barberServiceId\": \"{{serviceBId}}\", \"bookingType\": \"regular\" }\n  ],\n  \"date\": \"{{bookingDate}}\",\n  \"slotTime\": \"{{slotTime}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bookings/confirm",
+              "host": ["{{baseUrl}}"],
+              "path": ["bookings", "confirm"]
+            }
+          }
+        },
+        {
+          "name": "[CONFIRM] same-start conflict — 409",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 409', () => pm.response.to.have.status(409));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"services\": [\n    { \"barberServiceId\": \"{{serviceAId}}\", \"bookingType\": \"regular\" }\n  ],\n  \"date\": \"{{bookingDate}}\",\n  \"slotTime\": \"{{slotTime}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bookings/confirm",
+              "host": ["{{baseUrl}}"],
+              "path": ["bookings", "confirm"]
+            }
+          }
+        },
+        {
+          "name": "[CONFIRM] overlap inside multi-slot block — 409",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Compute slotTime + slotDurationMinutes (assumes 30-min grid). The first",
+                  "// service of a 2-service block covers [slotTime, slotTime+30) — so a fresh",
+                  "// 1-service booking at slotTime+30 must overlap with the second half of",
+                  "// the block created by 'CONFIRM happy path'.",
+                  "const [h, m] = pm.collectionVariables.get('slotTime').split(':').map(Number);",
+                  "const total = h * 60 + m + 30;",
+                  "const nh = String(Math.floor(total / 60)).padStart(2, '0');",
+                  "const nm = String(total % 60).padStart(2, '0');",
+                  "pm.variables.set('overlapSlotTime', `${nh}:${nm}`);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 409', () => pm.response.to.have.status(409));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"services\": [\n    { \"barberServiceId\": \"{{serviceAId}}\", \"bookingType\": \"regular\" }\n  ],\n  \"date\": \"{{bookingDate}}\",\n  \"slotTime\": \"{{overlapSlotTime}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bookings/confirm",
+              "host": ["{{baseUrl}}"],
+              "path": ["bookings", "confirm"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Client Booking Detail",
+      "item": [
+        {
+          "name": "[DETAIL] returns services[] with per-service pricing",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json().booking;",
+                  "pm.test('services[] length 2', () => pm.expect(json.services).to.have.lengthOf(2));",
+                  "pm.test('each service has pricing + startOffsetMinutes', () => {",
+                  "  json.services.forEach(s => {",
+                  "    pm.expect(s.pricing).to.have.all.keys('basePrice', 'additionalCost', 'totalPrice');",
+                  "    pm.expect(s).to.have.property('startOffsetMinutes');",
+                  "    pm.expect(s).to.have.property('bookingType');",
+                  "  });",
+                  "});",
+                  "pm.test('services are sorted by startOffsetMinutes', () => {",
+                  "  for (let i = 1; i < json.services.length; i++) {",
+                  "    pm.expect(json.services[i].startOffsetMinutes).to.be.greaterThan(json.services[i-1].startOffsetMinutes);",
+                  "  }",
+                  "});",
+                  "pm.test('totalPrice = sum of per-service totals', () => {",
+                  "  const sum = json.services.reduce((a, s) => a + s.pricing.totalPrice, 0);",
+                  "  pm.expect(json.totalPrice).to.be.closeTo(sum, 0.01);",
+                  "});",
+                  "pm.test('totalDurationMinutes = sum of durations', () => {",
+                  "  const sum = json.services.reduce((a, s) => a + s.durationMinutes, 0);",
+                  "  pm.expect(json.totalDurationMinutes).to.equal(sum);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/bookings/{{createdBookingId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "bookings", "{{createdBookingId}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Recurring Slots",
+      "item": [
+        {
+          "name": "[REC-SLOTS] 2 services — happy path",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('totalDurationMinutes > 0', () => pm.expect(json.totalDurationMinutes).to.be.greaterThan(0));",
+                  "if (json.recurringAvailable) {",
+                  "  pm.test('slots array returned', () => pm.expect(json.slots).to.be.an('array'));",
+                  "  pm.test('recurringPriceUsd is numeric', () => pm.expect(json.recurringPriceUsd).to.be.a('number'));",
+                  "} else {",
+                  "  console.log('recurringAvailable=false — either barber/services/day do not support recurring. Configure the schedule to enable this test.');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/barbers/{{barberId}}/recurring-slots?serviceIds={{serviceAId}},{{serviceBId}}&dayOfWeek={{dayOfWeek}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "barbers", "{{barberId}}", "recurring-slots"],
+              "query": [
+                { "key": "serviceIds", "value": "{{serviceAId}},{{serviceBId}}" },
+                { "key": "dayOfWeek", "value": "{{dayOfWeek}}" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "[REC-SLOTS] duplicate serviceIds — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 400', () => pm.response.to.have.status(400));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/barbers/{{barberId}}/recurring-slots?serviceIds={{serviceAId}},{{serviceAId}}&dayOfWeek={{dayOfWeek}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "barbers", "{{barberId}}", "recurring-slots"],
+              "query": [
+                { "key": "serviceIds", "value": "{{serviceAId}},{{serviceAId}}" },
+                { "key": "dayOfWeek", "value": "{{dayOfWeek}}" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "[REC-SLOTS] non-existent service — recurringAvailable:false",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('recurringAvailable is false', () => pm.expect(json.recurringAvailable).to.equal(false));",
+                  "pm.test('slots is empty', () => pm.expect(json.slots).to.have.lengthOf(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/client/barbers/{{barberId}}/recurring-slots?serviceIds=00000000-0000-0000-0000-000000000000&dayOfWeek={{dayOfWeek}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "barbers", "{{barberId}}", "recurring-slots"],
+              "query": [
+                { "key": "serviceIds", "value": "00000000-0000-0000-0000-000000000000" },
+                { "key": "dayOfWeek", "value": "{{dayOfWeek}}" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "8. Recurring Create",
+      "item": [
+        {
+          "name": "[REC-CREATE] 2 services weekly — happy path",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Pick a slot time far from the one used by the one-off Confirm test so",
+                  "// the recurring unique-slot index does not collide.",
+                  "pm.variables.set('recurringSlotTime', '14:00');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json().recurringBooking;",
+                  "pm.collectionVariables.set('recurringId', json.id);",
+                  "pm.test('services[] length 2', () => pm.expect(json.services).to.have.lengthOf(2));",
+                  "pm.test('totalDurationMinutes = sum of durations', () => {",
+                  "  pm.expect(json.totalDurationMinutes).to.equal(json.services[0].durationMinutes + json.services[1].durationMinutes);",
+                  "});",
+                  "pm.test('priceUsd = sum of per-service priceUsd', () => {",
+                  "  const sum = json.services.reduce((a, s) => a + s.priceUsd, 0);",
+                  "  pm.expect(json.priceUsd).to.be.closeTo(sum, 0.01);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"services\": [\n    { \"barberServiceId\": \"{{serviceAId}}\", \"bookingType\": \"regular\" },\n    { \"barberServiceId\": \"{{serviceBId}}\", \"bookingType\": \"regular\" }\n  ],\n  \"dayOfWeek\": {{dayOfWeek}},\n  \"slotTime\": \"{{recurringSlotTime}}\",\n  \"frequency\": \"weekly\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings"]
+            }
+          }
+        },
+        {
+          "name": "[REC-CREATE] duplicate services — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 400', () => pm.response.to.have.status(400));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"services\": [\n    { \"barberServiceId\": \"{{serviceAId}}\", \"bookingType\": \"regular\" },\n    { \"barberServiceId\": \"{{serviceAId}}\", \"bookingType\": \"regular\" }\n  ],\n  \"dayOfWeek\": {{dayOfWeek}},\n  \"slotTime\": \"11:00\",\n  \"frequency\": \"weekly\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings"]
+            }
+          }
+        },
+        {
+          "name": "[REC-CREATE] empty services — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 400', () => pm.response.to.have.status(400));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"services\": [],\n  \"dayOfWeek\": {{dayOfWeek}},\n  \"slotTime\": \"12:00\",\n  \"frequency\": \"weekly\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings"]
+            }
+          }
+        },
+        {
+          "name": "[REC-CREATE] block overflows window — 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Status 400', () => pm.response.to.have.status(400));"]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"barberId\": \"{{barberId}}\",\n  \"services\": [\n    { \"barberServiceId\": \"{{serviceAId}}\", \"bookingType\": \"regular\" },\n    { \"barberServiceId\": \"{{serviceBId}}\", \"bookingType\": \"regular\" }\n  ],\n  \"dayOfWeek\": {{dayOfWeek}},\n  \"slotTime\": \"16:45\",\n  \"frequency\": \"weekly\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/client/recurring-bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["client", "recurring-bookings"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
