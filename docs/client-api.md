@@ -11,15 +11,17 @@ This document covers every endpoint a client user hits — from registration thr
 1. [Conventions](#conventions)
 2. [Shared Enums](#shared-enums)
 3. [Auth](#1-auth)
-4. [Browse Barbers](#2-browse-barbers)
-5. [Availability (one-off bookings)](#3-availability-one-off-bookings)
-6. [Bookings — Preview, Confirm, Manage](#4-bookings--preview-confirm-manage)
-7. [Recurring Bookings](#5-recurring-bookings)
-8. [Reviews](#6-reviews)
-9. [Conversations / Messaging](#7-conversations--messaging)
-10. [Push Notifications](#8-push-notifications)
-11. [Common Error Codes](#common-error-codes)
-12. [End-to-End Booking Flow](#end-to-end-booking-flow-cheat-sheet)
+4. [Profile](#2-profile)
+5. [Subscriptions & Stripe Payment Flow](#3-subscriptions--stripe-payment-flow)
+6. [Browse Barbers](#4-browse-barbers)
+7. [Availability (one-off bookings)](#5-availability-one-off-bookings)
+8. [Bookings — Preview, Confirm, Manage](#6-bookings--preview-confirm-manage)
+9. [Recurring Bookings](#7-recurring-bookings)
+10. [Reviews](#8-reviews)
+11. [Conversations / Messaging](#9-conversations--messaging)
+12. [Push Notifications](#10-push-notifications)
+13. [Common Error Codes](#common-error-codes)
+14. [End-to-End Booking Flow](#end-to-end-booking-flow-cheat-sheet)
 
 ---
 
@@ -43,6 +45,14 @@ This document covers every endpoint a client user hits — from registration thr
 - **Pagination:**
   - **Page-based** (barbers list, client bookings, conversations, notifications): `page` + `limit`. Response wraps a `pagination` block with `currentPage`, `totalPages`, `hasNextPage`, `limit`, and a total count (`totalBarbers` / `totalBookings` / etc.).
   - **Cursor-based** (recurring bookings, reviews, messages): `cursor=<id-of-last-item>` + `limit`. Response returns `nextCursor` + `hasMore`.
+- **Subscription gating:** browse/profile/messaging endpoints are open to any authenticated client, but **booking actions require an active subscription**. The following routes are guarded — they return `403` with code `SUBSCRIPTION_REQUIRED` when `clients.subscription_status` is not `active`:
+  - `GET /barbers/:barberId/availability`
+  - `POST /bookings/preview`
+  - `POST /bookings/confirm`
+  - `GET /client/barbers/:barberId/recurring-slots`
+  - `POST /client/recurring-bookings`
+
+  Treat `SUBSCRIPTION_REQUIRED` as a signal to route the user to the paywall (Section 3) before retrying.
 
 ---
 
@@ -153,11 +163,219 @@ Single-step client signup.
 - **Body:** `{ "token": "<token_hash>", "newPassword": "NewPass1!" }`
 - **Response 201:** `{ "success": true }`.
 
+### 1.8 `PATCH /auth/change-password`
+
+Change password while signed in. Re-authenticates with the current password before applying the new one.
+
+- **Auth:** required
+- **Body** (`ChangePasswordDto`):
+  | Field | Type | Required | Notes |
+  |---|---|---|---|
+  | `currentPassword` | string | yes | min 8 |
+  | `newPassword` | string | yes | min 8, must differ from current |
+- **Response 200:** `{ "success": true }`
+- Errors: `401` if `currentPassword` is wrong.
+
 ---
 
-## 2. Browse Barbers
+## 2. Profile
 
-### 2.1 `GET /client/barbers`
+### 2.1 `GET /client/profile`
+
+Returns the authenticated client's profile, billing summary, and the next upcoming booking (if any). Use this as the source for the home/profile screen.
+
+- **Auth:** required (client)
+- **Response 200** (`ClientProfileResponseDto`):
+  ```ts
+  {
+    id: string;                                     // = auth.users.id
+    name: string;
+    username: string | null;
+    profilePhotoUrl: string | null;
+    email: string | null;
+    subscriptionStatus: 'inactive' | 'active' | 'past_due' | 'cancelled';
+    subscriptionExpiresAt: string | null;           // ISO timestamp
+    createdAt: string;
+    nextUpcomingBooking: {
+      id: string;
+      barberId: string;
+      barberName: string;
+      barberProfileImage: string | null;
+      serviceName: string;
+      scheduledAt: string;                          // ISO timestamp
+      appointmentDate: 'YYYY-MM-DD';
+      appointmentTime: 'HH:mm';
+      durationMinutes: number;
+      status: BookingStatus;
+      isRecurring: boolean;
+      recurringBookingId: string | null;
+    } | null;
+  }
+  ```
+
+### 2.2 `PATCH /client/profile`
+
+Update name, username, and/or photo. Send `multipart/form-data` if uploading a photo, otherwise `application/json` works.
+
+- **Auth:** required (client)
+- **Content-Type:** `multipart/form-data` *or* `application/json`
+- **Body fields** (all optional):
+  | Field | Type | Notes |
+  |---|---|---|
+  | `photo` | file | new profile photo, max 5 MB. Replaces the previous photo. |
+  | `name` | string | 1..100 |
+  | `username` | string | 3..30, letters/digits/underscore only. Must be unique across clients. |
+- **Response 200:** `ClientProfileResponseDto` (same shape as `GET`)
+- Errors: `409` if `username` is already taken.
+
+---
+
+## 3. Subscriptions & Stripe Payment Flow
+
+The client app charges a recurring **monthly** or **yearly** subscription. An active subscription unlocks booking endpoints (see "Subscription gating" in [Conventions](#conventions)).
+
+### 3.1 How payment collection works on the device
+
+The mobile app uses the **Stripe React Native SDK** (`@stripe/stripe-react-native`) to collect card details — **the API never receives raw card data**.
+
+1. App initialises Stripe with the publishable key (env-specific).
+2. App opens the SDK's `PaymentSheet` (or `CardField` for a custom UI). The user enters their card.
+3. The SDK returns a `paymentMethodId` of the form `pm_...`.
+4. The app sends this `paymentMethodId` to `POST /subscriptions` together with the chosen plan.
+5. The backend attaches the PM to the Stripe customer, creates the subscription with `payment_behavior: 'default_incomplete'`, and returns:
+   - `subscriptionId`
+   - `status` (initially `inactive` — flips to `active` only after the webhook fires)
+   - `clientSecret` (when SCA confirmation is required) or `null`.
+6. **If `clientSecret` is non-null**, the app calls `confirmPayment(clientSecret, { paymentMethodType: 'Card' })` from the Stripe SDK to satisfy 3DS / SCA. Skip this step if `clientSecret` is null.
+7. The app polls `GET /subscriptions/me` (or waits a few seconds and refreshes) until `status === 'active'`. The flip happens when the `customer.subscription.created` / `customer.subscription.updated` webhook lands on `POST /webhooks/stripe`.
+8. Once active, the user can book.
+
+> **Do not** treat the immediate response from `POST /subscriptions` as proof of activation. Always verify via `GET /subscriptions/me` (or by retrying the gated booking call and reacting to `SUBSCRIPTION_REQUIRED`).
+
+### 3.2 Subscription status meanings
+
+| Status | What it means | App should… |
+|---|---|---|
+| `inactive` | Never subscribed, or initial subscription not yet confirmed. | Show paywall; allow `POST /subscriptions`. |
+| `active` | Paid and current. | Booking endpoints work. |
+| `past_due` | Latest invoice failed. | Prompt the user to update their card via `POST /subscriptions/me/payment-method`. Stripe will retry; status auto-recovers to `active` on `invoice.payment_succeeded`. |
+| `cancelled` | Period ended after a user cancellation, or Stripe removed the subscription. | Show paywall again; `POST /subscriptions` to re-subscribe. |
+
+### 3.3 `POST /subscriptions`
+
+Create a subscription for the authenticated client. Idempotent at the user level only in the sense that a second call replaces the previous in-flight subscription — do not call this if the user already has `active`.
+
+- **Auth:** required (client)
+- **Body** (`CreateSubscriptionDto`):
+  | Field | Type | Required | Notes |
+  |---|---|---|---|
+  | `plan` | `'monthly' \| 'yearly'` | yes | |
+  | `paymentMethodId` | string | yes | Stripe PM id (`pm_...`) returned by the Stripe SDK |
+- **Response 201** (`CreateSubscriptionResponseDto`):
+  ```ts
+  {
+    subscriptionId: string;                  // sub_...
+    status: 'inactive' | 'active' | 'past_due' | 'cancelled';
+    clientSecret: string | null;             // confirm with Stripe SDK if non-null
+  }
+  ```
+
+### 3.4 `GET /subscriptions/me`
+
+Read the current subscription state. Always reflects the latest webhook-mirrored state.
+
+- **Auth:** required (client)
+- **Response 200** (`SubscriptionStateResponseDto`):
+  ```ts
+  {
+    status: 'inactive' | 'active' | 'past_due' | 'cancelled';
+    plan: 'monthly' | 'yearly' | null;
+    currentPeriodEnd: string | null;         // ISO timestamp — when the paid period ends
+    cancelAtPeriodEnd: boolean;              // true after the user has scheduled a cancel
+  }
+  ```
+
+### 3.5 `PATCH /subscriptions/me/plan`
+
+Switch plan. **Only `monthly → yearly` is allowed.** Yearly → monthly downgrades are rejected with `409`.
+
+- **Auth:** required (client)
+- **Body** (`SwitchPlanDto`): `{ "plan": "yearly" }`
+- **Response 200:** `SubscriptionStateResponseDto` (same shape as `GET`)
+- Errors:
+  - `400 No active subscription to switch.`
+  - `409 PLAN_DOWNGRADE_NOT_ALLOWED` — already on yearly, or the request asks for monthly.
+
+> Stripe applies a prorated invoice (`proration_behavior: 'always_invoice'`). The client's `currentPeriodEnd` updates from the `customer.subscription.updated` webhook — give it a moment after the call before re-rendering the new period.
+
+### 3.6 `DELETE /subscriptions/me`
+
+Cancel **at period end**. The user retains access until `currentPeriodEnd`. **No refunds**, no mid-period termination.
+
+- **Auth:** required (client)
+- **Body:** none
+- **Response 200** (`CancelSubscriptionResponseDto`):
+  ```ts
+  {
+    status: 'active';                        // still active until period_end
+    cancelAtPeriodEnd: true;
+    currentPeriodEnd: string | null;
+  }
+  ```
+- Errors: `400 No active subscription to cancel.`
+
+When `currentPeriodEnd` passes, the `customer.subscription.deleted` webhook flips status to `cancelled`.
+
+### 3.7 `POST /subscriptions/me/payment-method`
+
+Replace the saved card. Old card is detached from Stripe.
+
+- **Auth:** required (client)
+- **Body** (`ReplaceCardDto`): `{ "paymentMethodId": "pm_..." }`
+- **Response 200** (`CardActionResponseDto`):
+  ```json
+  { "ok": true, "paymentMethodId": "pm_card_mastercard" }
+  ```
+- Use this when `subscription_status` is `past_due` to retry billing with a new card.
+
+### 3.8 `DELETE /subscriptions/me/payment-method`
+
+Remove the saved card. **Disallowed while a subscription or recurring arrangement is active** — cancel those first.
+
+- **Auth:** required (client)
+- **Body:** none
+- **Response 200:** `{ "ok": true, "paymentMethodId": null }`
+- Errors:
+  - `409 ACTIVE_SUBSCRIPTION` — cancel the subscription first (or wait for it to expire).
+  - `409 ACTIVE_RECURRING` — at least one recurring booking is in `pending_barber_approval`, `active`, or `paused`.
+
+### 3.9 No-show charges (background, no client endpoint)
+
+If a barber marks one of the client's bookings as `no_show` and has the no-show charge feature enabled (with a verified Stripe Connect account), the platform charges the client's saved card the configured USD amount via a Stripe `PaymentIntent`. The client app sees the result via:
+
+- `GET /client/bookings/:id` → `noShowCharged: true` and `noShowChargeAmountUsd: <amount>`.
+- A `booking_cancelled` push notification (the cancellation reflects the no-show transition).
+
+The card used is the same one backing the active subscription (`stripe_payment_method_id`).
+
+### 3.10 Webhook (server-to-server, **not** called by the app)
+
+`POST /webhooks/stripe` is Stripe's webhook receiver. The app never calls it. Important behaviors it drives:
+
+- `customer.subscription.created` / `.updated` → mirrors `subscription_status`, `subscription_plan`, `subscription_expires_at`, `subscription_cancel_at_period_end` onto the client row.
+- `customer.subscription.deleted` → flips status to `cancelled`.
+- `invoice.payment_failed` → sets status to `past_due`.
+- `invoice.payment_succeeded` → if the client was `past_due`, recovers to `active`.
+- `payment_intent.succeeded` / `.payment_failed` (kind=`no_show`) → updates `bookings.no_show_charged` + `no_show_charge_amount_usd`.
+- `payment_method.detached` → clears `stripe_payment_method_id` on the client row.
+
+This is why client status is **eventually consistent** — always re-fetch `GET /subscriptions/me` after a state-changing call.
+
+---
+
+## 4. Browse Barbers
+
+### 4.1 `GET /client/barbers`
 
 Paginated list of barbers, with distance, rating, recurring availability, and a few top services.
 
@@ -189,7 +407,7 @@ Paginated list of barbers, with distance, rating, recurring availability, and a 
   }
   ```
 
-### 2.2 `GET /client/barbers/:barberId`
+### 4.2 `GET /client/barbers/:barberId`
 
 Barber profile screen: bio, contact, working hours, services, last 7 reviews + summary, distance.
 
@@ -237,9 +455,9 @@ Barber profile screen: bio, contact, working hours, services, last 7 reviews + s
 
 ---
 
-## 3. Availability (one-off bookings)
+## 5. Availability (one-off bookings)
 
-### 3.1 `GET /barbers/:barberId/availability`
+### 5.1 `GET /barbers/:barberId/availability`
 
 Returns slot grids for `regular`, `afterHours`, and `dayOff` tiers across a date range. Used by the booking calendar/slot picker.
 
@@ -280,11 +498,11 @@ Returns slot grids for `regular`, `afterHours`, and `dayOff` tiers across a date
 
 ---
 
-## 4. Bookings — Preview, Confirm, Manage
+## 6. Bookings — Preview, Confirm, Manage
 
-The booking flow is a **two-step preview/confirm** to lock in pricing transparency before the row is created.
+The booking flow is a **two-step preview/confirm** to lock in pricing transparency before the row is created. Both `preview` and `confirm` require an active subscription — see "Subscription gating" in [Conventions](#conventions).
 
-### 4.1 `POST /bookings/preview`
+### 6.1 `POST /bookings/preview`
 
 Compute the price and validate the slot, **without** creating a booking. Same payload as `confirm`. Returns HTTP `200` (not `201` — nothing was persisted).
 
@@ -315,7 +533,7 @@ Compute the price and validate the slot, **without** creating a booking. Same pa
   }
   ```
 
-### 4.2 `POST /bookings/confirm`
+### 6.2 `POST /bookings/confirm`
 
 Same body as `preview`. Creates the booking row.
 
@@ -338,7 +556,7 @@ Same body as `preview`. Creates the booking row.
   ```
 - Errors: `409` if the slot is no longer available (race) or violates an advance-notice rule.
 
-### 4.3 `GET /client/bookings/upcoming`
+### 6.3 `GET /client/bookings/upcoming`
 
 Paginated upcoming bookings. **Recurring subscriptions collapse to their next occurrence only** (so the user sees one card per active recurring booking, not 60 days of duplicates).
 
@@ -366,7 +584,7 @@ Paginated upcoming bookings. **Recurring subscriptions collapse to their next oc
   }
   ```
 
-### 4.4 `GET /client/bookings/past`
+### 6.4 `GET /client/bookings/past`
 
 Paginated past (completed) bookings, with a flag indicating whether the user has already left a review.
 
@@ -389,7 +607,7 @@ Paginated past (completed) bookings, with a flag indicating whether the user has
   }
   ```
 
-### 4.5 `GET /client/bookings/recurring`
+### 6.5 `GET /client/bookings/recurring`
 
 Page-paginated list of the client's recurring subscriptions in a UI-friendly shape (next-appointment + appointments-left).
 
@@ -414,9 +632,9 @@ Page-paginated list of the client's recurring subscriptions in a UI-friendly sha
   }
   ```
 
-> For the **full** recurring CRUD (pause/resume/cancel/renew, detailed view with past + upcoming occurrences), use `/client/recurring-bookings/...` in [Section 5](#5-recurring-bookings).
+> For the **full** recurring CRUD (pause/resume/cancel/renew, detailed view with past + upcoming occurrences), use `/client/recurring-bookings/...` in [Section 7](#7-recurring-bookings).
 
-### 4.6 `GET /client/bookings/:id`
+### 6.6 `GET /client/bookings/:id`
 
 - **Auth:** required (client)
 - **Response 200** (`ClientBookingDetailResponseDto`):
@@ -449,7 +667,7 @@ Page-paginated list of the client's recurring subscriptions in a UI-friendly sha
   }
   ```
 
-### 4.7 `PATCH /client/bookings/:id/cancel`
+### 6.7 `PATCH /client/bookings/:id/cancel`
 
 Cancel one of the user's own upcoming bookings.
 
@@ -470,7 +688,7 @@ Cancel one of the user's own upcoming bookings.
 
 ---
 
-## 5. Recurring Bookings
+## 7. Recurring Bookings
 
 A *recurring booking* is a subscription (weekly or biweekly) at a fixed day-of-week + slot time. The flow is:
 
@@ -479,7 +697,7 @@ A *recurring booking* is a subscription (weekly or biweekly) at a fixed day-of-w
 3. The barber accepts or declines (out of the client app's hands).
 4. **Once accepted**, the system synchronously creates a 60-day rolling window of `confirmed` booking rows. The client sees them via `GET /client/bookings/upcoming` (collapsed) or `GET /client/recurring-bookings/:id` (full breakdown).
 
-### 5.1 `GET /barbers/:barberId/services/recurring`
+### 7.1 `GET /barbers/:barberId/services/recurring`
 
 Client-facing list of the barber's services that **support** recurring bookings (i.e. `recurringPriceUsd` is set and at least one schedule day has `recurringEnabled = true`).
 
@@ -498,7 +716,7 @@ Client-facing list of the barber's services that **support** recurring bookings 
   }
   ```
 
-### 5.2 `GET /client/barbers/:barberId/recurring-slots`
+### 7.2 `GET /client/barbers/:barberId/recurring-slots`
 
 Returns the slot times that support recurring on a given day, **and** the exact recurring price + allowed frequencies.
 
@@ -521,7 +739,7 @@ Returns the slot times that support recurring on a given day, **and** the exact 
   }
   ```
 
-### 5.3 `POST /client/recurring-bookings`
+### 7.3 `POST /client/recurring-bookings`
 
 Submit the offer. **Does not create any appointment rows yet** — only the recurring subscription with `pending_barber_approval`.
 
@@ -536,7 +754,7 @@ Submit the offer. **Does not create any appointment rows yet** — only the recu
   | `frequency` | `'weekly' \| 'biweekly'` | yes | must be in the day's `recurringFrequencyOptions` |
 - **Response 201** (`RecurringBookingResponseDto`): `{ recurringBooking: RecurringBookingDto }` with `status: 'pending_barber_approval'`.
 
-### 5.4 `GET /client/recurring-bookings`
+### 7.4 `GET /client/recurring-bookings`
 
 Cursor-paginated list of the client's recurring subscriptions.
 
@@ -565,7 +783,7 @@ Cursor-paginated list of the client's recurring subscriptions.
   }
   ```
 
-### 5.5 `GET /client/recurring-bookings/:id`
+### 7.5 `GET /client/recurring-bookings/:id`
 
 Detail with past + upcoming occurrences.
 
@@ -597,7 +815,7 @@ Detail with past + upcoming occurrences.
   }
   ```
 
-### 5.6 `PATCH /client/recurring-bookings/:id/pause`
+### 7.6 `PATCH /client/recurring-bookings/:id/pause`
 
 - **Auth:** required (client)
 - **Body**:
@@ -607,13 +825,13 @@ Detail with past + upcoming occurrences.
   | `pauseEndDate` | `'YYYY-MM-DD'` | no | omit for indefinite |
 - **Response 200:** `{ recurringBooking }` (status `paused`).
 
-### 5.7 `PATCH /client/recurring-bookings/:id/resume`
+### 7.7 `PATCH /client/recurring-bookings/:id/resume`
 
 - **Auth:** required (client)
 - **Body:** none
 - **Response 200:** `{ recurringBooking }` (status `active`; window re-filled).
 
-### 5.8 `PATCH /client/recurring-bookings/:id/cancel`
+### 7.8 `PATCH /client/recurring-bookings/:id/cancel`
 
 Cancels the subscription. Future generated rows are cancelled; past/completed rows stay.
 
@@ -621,7 +839,7 @@ Cancels the subscription. Future generated rows are cancelled; past/completed ro
 - **Body:** none
 - **Response 200:** `{ recurringBooking }` (status `cancelled`, `cancelledBy: 'client'`).
 
-### 5.9 `POST /client/recurring-bookings/:id/renew`
+### 7.9 `POST /client/recurring-bookings/:id/renew`
 
 Create a fresh renewal of an expiring/cancelled subscription. Settings copy over; **price re-snapshots at current rates** (the barber may have changed prices).
 
@@ -631,9 +849,9 @@ Create a fresh renewal of an expiring/cancelled subscription. Settings copy over
 
 ---
 
-## 6. Reviews
+## 8. Reviews
 
-### 6.1 `POST /client/bookings/:bookingId/review`
+### 8.1 `POST /client/bookings/:bookingId/review`
 
 Leave a review for a **completed** booking the user owns.
 
@@ -657,9 +875,9 @@ Leave a review for a **completed** booking the user owns.
   ```
 - Errors: `403` if the booking is not the caller's; `409` if the booking is not `completed` or already has a review.
 
-### 6.2 `GET /client/barbers/:barberId/reviews`
+### 8.2 `GET /client/barbers/:barberId/reviews`
 
-Cursor-paginated reviews for a barber.
+Cursor-paginated reviews for a barber. Supports filtering by exact star rating.
 
 - **Auth:** required (client)
 - **Query** (`ListReviewsQueryDto`):
@@ -667,10 +885,11 @@ Cursor-paginated reviews for a barber.
   |---|---|---|---|
   | `cursor` | uuid | no | |
   | `limit` | 1..50 | no | default 20 |
+  | `rating` | int 1..5 | no | when set, only reviews with this exact star count are returned |
 - **Response 200** (`ReviewsListResponseDto`):
   ```ts
   {
-    barber: { id, name, averageRating: number | null, totalReviews };
+    barber: { id, name, averageRating: number | null, totalReviews };  // unfiltered totals
     reviews: [{
       id,
       client: { name, profilePhotoUrl },
@@ -684,13 +903,15 @@ Cursor-paginated reviews for a barber.
   }
   ```
 
+> `barber.averageRating` and `barber.totalReviews` are computed across **all** reviews and don't change when `rating` is set. Only the `reviews` array is filtered.
+
 ---
 
-## 7. Conversations / Messaging
+## 9. Conversations / Messaging
 
 Both clients and barbers use `/conversations`. **Clients cannot start a thread** — only the barber can (`POST /conversations/start`). The client app should hide any "New chat" CTA but display threads the barber starts.
 
-### 7.1 `GET /conversations`
+### 9.1 `GET /conversations`
 
 - **Auth:** required (client)
 - **Query** (`ListConversationsQueryDto`):
@@ -716,7 +937,7 @@ Both clients and barbers use `/conversations`. **Clients cannot start a thread**
   }
   ```
 
-### 7.2 `GET /conversations/:id/messages`
+### 9.2 `GET /conversations/:id/messages`
 
 Cursor-paginated history. **Marks counterparty messages as read.**
 
@@ -741,7 +962,7 @@ Cursor-paginated history. **Marks counterparty messages as read.**
   }
   ```
 
-### 7.3 `POST /conversations/:id/messages`
+### 9.3 `POST /conversations/:id/messages`
 
 - **Auth:** required (client)
 - **Body:** `{ "body": "string (1..1000)" }`
@@ -751,9 +972,9 @@ Cursor-paginated history. **Marks counterparty messages as read.**
 
 ---
 
-## 8. Push Notifications
+## 10. Push Notifications
 
-### 8.1 `POST /device-token`
+### 10.1 `POST /device-token`
 
 Register or refresh the user's Expo / FCM push token. Upserts on `(user_id, platform)`.
 
@@ -765,7 +986,7 @@ Register or refresh the user's Expo / FCM push token. Upserts on `(user_id, plat
   | `platform` | `'ios' \| 'android'` | yes | |
 - **Response 200:** `{ "id": "<row id>", "token": "<token>", "platform": "ios" }`
 
-### 8.2 `DELETE /device-token`
+### 10.2 `DELETE /device-token`
 
 Call on logout.
 
@@ -773,7 +994,7 @@ Call on logout.
 - **Body:** `{ "token": "<token>" }`
 - **Response 200:** `{ "removed": true }`
 
-### 8.3 `GET /client/notifications`
+### 10.3 `GET /client/notifications`
 
 Page-paginated, newest first.
 
@@ -804,12 +1025,12 @@ Page-paginated, newest first.
   ```
   Notification types relevant to clients: `booking_confirmed`, `booking_cancelled`, `recurring_accepted`, `recurring_refused`, `recurring_expiring`, `new_message`. Use the populated id field (`bookingId` / `recurringBookingId` / `conversationId` + `messageId`) to deep-link.
 
-### 8.4 `GET /client/notifications/unread-count`
+### 10.4 `GET /client/notifications/unread-count`
 
 - **Auth:** required (client)
 - **Response 200:** `{ "unreadCount": 3 }`
 
-### 8.5 `PUT /client/notifications/:notificationId/read`
+### 10.5 `PUT /client/notifications/:notificationId/read`
 
 - **Auth:** required (client)
 - **Body:** none
@@ -825,16 +1046,30 @@ Page-paginated, newest first.
 |---|---|---|
 | 400 | Validation error | missing/malformed field; `endDate > startDate + 14d` on availability; `services` array empty or > 4 items |
 | 401 | Unauthorized | missing/expired access token; refresh and retry |
-| 403 | Forbidden | wrong role (e.g. trying to start a conversation as a client), or accessing another user's resource |
+| 403 | Forbidden | wrong role (e.g. trying to start a conversation as a client), accessing another user's resource, **or** `SUBSCRIPTION_REQUIRED` on a gated booking call |
 | 404 | Not found | bad id, or it belongs to another user |
-| 409 | Conflict | slot already taken (race), advance-notice rule violated, illegal state transition (e.g. cancelling a `completed` booking, reviewing a non-completed booking, double review on the same booking) |
+| 409 | Conflict | slot already taken (race), advance-notice rule violated, illegal state transition (e.g. cancelling a `completed` booking, reviewing a non-completed booking, double review on the same booking), `PLAN_DOWNGRADE_NOT_ALLOWED`, `ACTIVE_SUBSCRIPTION`, `ACTIVE_RECURRING` |
 | 500 | Server error | log + retry |
 
 The mobile app should treat `401` as a signal to call `POST /auth/refresh` once and retry; if refresh also returns `401`, log the user out.
 
+Common application error codes (`code` field in the error envelope):
+- `SUBSCRIPTION_REQUIRED` (403) — booking endpoint hit without an `active` subscription. Route to the paywall (Section 3).
+- `PLAN_DOWNGRADE_NOT_ALLOWED` (409) — `PATCH /subscriptions/me/plan` rejected (only monthly→yearly is allowed).
+- `ACTIVE_SUBSCRIPTION` (409) — `DELETE /subscriptions/me/payment-method` rejected because a subscription is still active.
+- `ACTIVE_RECURRING` (409) — same endpoint, but rejected because of an active/pending/paused recurring booking.
+
 ---
 
 ## End-to-End Booking Flow (cheat sheet)
+
+**Subscription gate (run once before any booking action):**
+1. After login, call `GET /subscriptions/me`.
+2. If `status !== 'active'`:
+   - Collect a card via the Stripe React Native SDK → get `paymentMethodId`.
+   - `POST /subscriptions` with the chosen `plan` and `paymentMethodId`.
+   - If response has `clientSecret`, call `confirmPayment(clientSecret)` from the Stripe SDK to satisfy SCA.
+   - Poll `GET /subscriptions/me` until `status === 'active'`.
 
 **One-off booking:**
 1. `GET /client/barbers?latitude=…&longitude=…` → list view
@@ -867,6 +1102,15 @@ The mobile app should treat `401` as a signal to call `POST /auth/refresh` once 
 | Auth | GET | `/auth/me` |
 | Auth | POST | `/auth/forgot-password` |
 | Auth | POST | `/auth/reset-password` |
+| Auth | PATCH | `/auth/change-password` |
+| Profile | GET | `/client/profile` |
+| Profile | PATCH | `/client/profile` |
+| Subscriptions | POST | `/subscriptions` |
+| Subscriptions | GET | `/subscriptions/me` |
+| Subscriptions | PATCH | `/subscriptions/me/plan` |
+| Subscriptions | DELETE | `/subscriptions/me` |
+| Subscriptions | POST | `/subscriptions/me/payment-method` |
+| Subscriptions | DELETE | `/subscriptions/me/payment-method` |
 | Browse | GET | `/client/barbers` |
 | Browse | GET | `/client/barbers/:barberId` |
 | Browse | GET | `/barbers/:barberId/services/recurring` |

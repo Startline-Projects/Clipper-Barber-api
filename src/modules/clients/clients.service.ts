@@ -1,5 +1,11 @@
-import { Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
-import { SupabaseService } from '../supabase/supabase.service';
+import 'multer';
+import {
+  ConflictException,
+  Injectable,
+  InternalServerErrorException,
+  NotFoundException,
+} from '@nestjs/common';
+import { SupabaseService, SupabaseUserPayload } from '../supabase/supabase.service';
 import {
   BarberSortDto,
   GetBarberDetailQueryDto,
@@ -17,8 +23,15 @@ import {
   BarberDetailServiceDto,
   BarberWorkingDayDto,
 } from './dto/barber-detail-response.dto';
+import {
+  ClientNextBookingDto,
+  ClientProfileResponseDto,
+} from './dto/client-profile-response.dto';
+import { UpdateClientProfileDto } from './dto/update-client-profile.dto';
+import { BookingStatusDto } from '../barbers/dto/list-barber-bookings-query.dto';
 import { ServiceType } from '../barbers/services/dto/create-barber-service.dto';
 import { buildDistance, haversineKm } from './utils/distance.util';
+import messages from '../../common/messages.json';
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 10;
@@ -74,6 +87,39 @@ interface ClientLite {
   user_id: string;
   name: string;
   profile_photo_url: string | null;
+}
+
+interface ClientRow {
+  user_id: string;
+  name: string;
+  username: string | null;
+  profile_photo_url: string | null;
+  subscription_status: string;
+  subscription_expires_at: string | null;
+  created_at: string;
+}
+
+interface UpcomingBookingRow {
+  id: string;
+  scheduled_at: string;
+  status: string;
+  duration_minutes: number | null;
+  barber_id: string;
+  barber_service_id: string | null;
+  recurring_booking_id: string | null;
+}
+
+interface BarberLiteForBooking {
+  user_id: string;
+  full_name: string;
+  profile_photo_url: string | null;
+  timezone: string;
+}
+
+interface ServiceLiteForBooking {
+  id: string;
+  name: string;
+  duration_minutes: number;
 }
 
 @Injectable()
@@ -226,6 +272,221 @@ export class ClientsService {
       distance: buildDistance(distanceKm),
     };
   }
+
+  // ────────────────────────────────────────────────────────────
+  // Client profile — read / update
+  // ────────────────────────────────────────────────────────────
+
+  public async getProfile(user: SupabaseUserPayload): Promise<ClientProfileResponseDto> {
+    const row = await this.fetchClientRow(user.sub);
+    const nextUpcomingBooking = await this.fetchFirstUpcomingBookingForClient(user.sub);
+    return this.buildClientProfileResponse(row, user.email ?? null, nextUpcomingBooking);
+  }
+
+  public async updateProfile(
+    user: SupabaseUserPayload,
+    dto: UpdateClientProfileDto,
+    photo?: Express.Multer.File,
+  ): Promise<ClientProfileResponseDto> {
+    if (dto.username !== undefined) {
+      const { data: existing, error: existingError } = await this.db
+        .from('clients')
+        .select('user_id')
+        .eq('username', dto.username)
+        .maybeSingle();
+
+      if (existingError) {
+        throw new InternalServerErrorException(messages.client.PROFILE_UPDATE_FAILED);
+      }
+      if (existing && existing.user_id !== user.sub) {
+        throw new ConflictException(messages.client.USERNAME_TAKEN);
+      }
+    }
+
+    const patch: Record<string, unknown> = {};
+    if (dto.name !== undefined) patch.name = dto.name;
+    if (dto.username !== undefined) patch.username = dto.username;
+
+    if (photo) {
+      patch.profile_photo_url = await this.uploadClientPhoto(user.sub, photo);
+    }
+
+    if (Object.keys(patch).length > 0) {
+      const { error } = await this.db
+        .from('clients')
+        .update(patch)
+        .eq('user_id', user.sub)
+        .select('user_id')
+        .maybeSingle();
+
+      if (error) {
+        throw new InternalServerErrorException(messages.client.PROFILE_UPDATE_FAILED);
+      }
+    }
+
+    if (dto.username !== undefined) {
+      await this.supabaseService.getClient().auth.admin.updateUserById(user.sub, {
+        user_metadata: { username: dto.username },
+      });
+    }
+
+    const row = await this.fetchClientRow(user.sub);
+    const nextUpcomingBooking = await this.fetchFirstUpcomingBookingForClient(user.sub);
+    return this.buildClientProfileResponse(row, user.email ?? null, nextUpcomingBooking);
+  }
+
+  private async fetchClientRow(clientAuthId: string): Promise<ClientRow> {
+    const { data, error } = await this.db
+      .from('clients')
+      .select(
+        'user_id, name, username, profile_photo_url, subscription_status, subscription_expires_at, created_at',
+      )
+      .eq('user_id', clientAuthId)
+      .maybeSingle();
+
+    if (error) throw new InternalServerErrorException(messages.client.PROFILE_LOAD_FAILED);
+    if (!data) throw new NotFoundException(messages.client.PROFILE_NOT_FOUND);
+    return data as ClientRow;
+  }
+
+  private async uploadClientPhoto(
+    clientAuthId: string,
+    photo: Express.Multer.File,
+  ): Promise<string> {
+    const ext = photo.mimetype.split('/')[1] ?? 'jpg';
+    const path = `${clientAuthId}/profile.${ext}`;
+
+    const { error } = await this.db.storage
+      .from('profile-photos')
+      .upload(path, photo.buffer, { contentType: photo.mimetype, upsert: true });
+
+    if (error) throw new InternalServerErrorException(messages.client.PROFILE_UPDATE_FAILED);
+
+    const { data } = this.db.storage.from('profile-photos').getPublicUrl(path);
+    return data.publicUrl;
+  }
+
+  private buildClientProfileResponse(
+    row: ClientRow,
+    email: string | null,
+    nextUpcomingBooking: ClientNextBookingDto | null,
+  ): ClientProfileResponseDto {
+    return {
+      id: row.user_id,
+      name: row.name,
+      username: row.username ?? null,
+      profilePhotoUrl: row.profile_photo_url ?? null,
+      email,
+      subscriptionStatus: row.subscription_status,
+      subscriptionExpiresAt: row.subscription_expires_at ?? null,
+      createdAt: new Date(row.created_at).toISOString(),
+      nextUpcomingBooking,
+    };
+  }
+
+  private async fetchFirstUpcomingBookingForClient(
+    clientAuthId: string,
+  ): Promise<ClientNextBookingDto | null> {
+    const nowIso = new Date().toISOString();
+
+    const { data, error } = await this.db
+      .from('bookings')
+      .select(
+        'id, scheduled_at, status, duration_minutes, barber_id, barber_service_id, recurring_booking_id',
+      )
+      .eq('client_id', clientAuthId)
+      .in('status', ['pending', 'confirmed'])
+      .gte('scheduled_at', nowIso)
+      .order('scheduled_at', { ascending: true })
+      .order('id', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) throw new InternalServerErrorException('Failed to fetch upcoming booking');
+    if (!data) return null;
+
+    const row = data as UpcomingBookingRow;
+
+    const [barber, service] = await Promise.all([
+      this.fetchBarberLite(row.barber_id),
+      row.barber_service_id ? this.fetchServiceLite(row.barber_service_id) : Promise.resolve(null),
+    ]);
+
+    const timezone = barber?.timezone ?? 'UTC';
+    const local = this.splitLocalDateTime(row.scheduled_at, timezone);
+
+    return {
+      id: row.id,
+      barberId: row.barber_id,
+      barberName: barber?.full_name ?? 'Unknown',
+      barberProfileImage: barber?.profile_photo_url ?? null,
+      serviceName: service?.name ?? 'Service',
+      scheduledAt: new Date(row.scheduled_at).toISOString(),
+      appointmentDate: local.date,
+      appointmentTime: local.time,
+      durationMinutes: row.duration_minutes ?? service?.duration_minutes ?? 0,
+      status: row.status as BookingStatusDto,
+      isRecurring: row.recurring_booking_id !== null,
+      recurringBookingId: row.recurring_booking_id,
+    };
+  }
+
+  private async fetchBarberLite(barberAuthId: string): Promise<BarberLiteForBooking | null> {
+    const { data, error } = await this.db
+      .from('barbers')
+      .select('user_id, full_name, profile_photo_url, timezone')
+      .eq('user_id', barberAuthId)
+      .maybeSingle();
+
+    if (error) throw new InternalServerErrorException('Failed to fetch barber');
+    if (!data) return null;
+    return {
+      user_id: data.user_id as string,
+      full_name: data.full_name as string,
+      profile_photo_url: (data.profile_photo_url as string | null) ?? null,
+      timezone: (data.timezone as string | null) ?? 'UTC',
+    };
+  }
+
+  private async fetchServiceLite(serviceId: string): Promise<ServiceLiteForBooking | null> {
+    const { data, error } = await this.db
+      .from('barber_services')
+      .select('id, name, duration_minutes')
+      .eq('id', serviceId)
+      .maybeSingle();
+
+    if (error) throw new InternalServerErrorException('Failed to fetch service');
+    if (!data) return null;
+    return {
+      id: data.id as string,
+      name: data.name as string,
+      duration_minutes: data.duration_minutes as number,
+    };
+  }
+
+  private splitLocalDateTime(utcIso: string, timezone: string): { date: string; time: string } {
+    const instant = new Date(utcIso);
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(instant);
+    const pick = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
+    const y = pick('year');
+    const mo = pick('month');
+    const d = pick('day');
+    const h = pick('hour') === '24' ? '00' : pick('hour');
+    const mi = pick('minute');
+    return { date: `${y}-${mo}-${d}`, time: `${h}:${mi}` };
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Barber browsing helpers
+  // ────────────────────────────────────────────────────────────
 
   private async resolveServiceSearchBarberIds(search?: string): Promise<string[] | null> {
     if (!search || search.trim().length === 0) return null;

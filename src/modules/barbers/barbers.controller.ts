@@ -1,3 +1,4 @@
+import 'multer';
 import {
   Body,
   Controller,
@@ -6,9 +7,19 @@ import {
   ParseUUIDPipe,
   Patch,
   Query,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { FileInterceptor } from '@nestjs/platform-express';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { BarbersService } from './barbers.service';
 import { AvailabilityService } from '../bookings/availability.service';
 import { GetAvailabilityQueryDto } from '../bookings/dto/get-availability-query.dto';
@@ -36,6 +47,8 @@ import {
   NoShowChargeSettingsResponseDto,
   UpdateNoShowChargeDto,
 } from './dto/update-no-show-charge.dto';
+import { UpdateBarberProfileDto } from './dto/update-barber-profile.dto';
+import { BarberProfileResponseDto } from '../auth/dto/responses/barber-profile.response.dto';
 
 @ApiTags('Barbers')
 @Controller('barbers')
@@ -124,6 +137,66 @@ export class BarberBookingsController {
     @Param('id', ParseUUIDPipe) id: string
   ): Promise<NoShowBookingResponseDto> {
     return this.barbersService.markNoShow(user.sub, id);
+  }
+}
+
+@ApiTags('Barber Profile')
+@ApiBearerAuth()
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles('barber')
+@Controller('barber/profile')
+export class BarberProfileController {
+  constructor(private readonly barbersService: BarbersService) {}
+
+  @Get()
+  @ApiOperation({
+    summary: 'Get the authenticated barber’s full profile',
+  })
+  @ApiResponse({ status: 200, type: BarberProfileResponseDto })
+  public async getProfile(
+    @CurrentUser() user: SupabaseUserPayload
+  ): Promise<BarberProfileResponseDto> {
+    return this.barbersService.getProfile(user.sub);
+  }
+
+  @Patch()
+  @UseInterceptors(FileInterceptor('photo'))
+  @ApiConsumes('multipart/form-data', 'application/json')
+  @ApiOperation({
+    summary: 'Update the authenticated barber’s profile',
+    description:
+      'Any subset of fields may be supplied. Send as multipart/form-data when including a `photo` file; otherwise application/json works just as well.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        photo: {
+          type: 'string',
+          format: 'binary',
+          description: 'Optional profile photo (max 5 MB)',
+        },
+        fullName: { type: 'string', maxLength: 100 },
+        shopName: { type: 'string', maxLength: 100 },
+        phone: { type: 'string' },
+        streetAddress: { type: 'string', maxLength: 200 },
+        city: { type: 'string', maxLength: 100 },
+        state: { type: 'string', maxLength: 50 },
+        zipCode: { type: 'string' },
+        latitude: { type: 'number' },
+        longitude: { type: 'number' },
+        bio: { type: 'string', maxLength: 500 },
+        instagramHandle: { type: 'string', maxLength: 50 },
+      },
+    },
+  })
+  @ApiResponse({ status: 200, type: BarberProfileResponseDto })
+  public async updateProfile(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Body() dto: UpdateBarberProfileDto,
+    @UploadedFile() photo?: Express.Multer.File
+  ): Promise<BarberProfileResponseDto> {
+    return this.barbersService.updateProfile(user.sub, dto, photo);
   }
 }
 

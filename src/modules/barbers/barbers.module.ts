@@ -1,7 +1,10 @@
 import { Module } from '@nestjs/common';
+import { MulterModule } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import {
   BarbersController,
   BarberBookingsController,
+  BarberProfileController,
   BarberSettingsController,
 } from './barbers.controller';
 import { BarbersService } from './barbers.service';
@@ -11,10 +14,18 @@ import { BookingsModule } from '../bookings/bookings.module';
 import { PaymentsModule } from '../payments/payments.module';
 
 @Module({
-  imports: [BookingsModule, PaymentsModule],
+  imports: [
+    BookingsModule,
+    PaymentsModule,
+    MulterModule.register({
+      storage: memoryStorage(),
+      limits: { fileSize: 5 * 1024 * 1024 },
+    }),
+  ],
   controllers: [
     BarbersController,
     BarberBookingsController,
+    BarberProfileController,
     BarberSettingsController,
     BarberServicesController,
   ],

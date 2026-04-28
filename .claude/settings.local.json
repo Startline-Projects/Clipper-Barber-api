@@ -4,7 +4,8 @@
       "Bash(xargs grep *)",
       "Bash(grep \"\\\\.ts$\")",
       "Bash(npx prettier *)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(npx nest *)"
     ]
   }
 }

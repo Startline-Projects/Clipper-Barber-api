@@ -11,6 +11,7 @@ import { SupabaseService, SupabaseUserPayload } from '../supabase/supabase.servi
 import { BarberStep1Dto } from './dto/barber-step1.dto';
 import { BarberStep2Dto } from './dto/barber-step2.dto';
 import { BarberStep3Dto } from './dto/barber-step3.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { ClientRegisterDto } from './dto/client-register.dto';
 import { LoginDto } from './dto/login.dto';
 import { TokensResponseDto } from './dto/responses/tokens.response.dto';
@@ -257,6 +258,39 @@ export class AuthService {
 
   public async forgotPassword(email: string): Promise<SuccessResponseDto> {
     await this.client.auth.resetPasswordForEmail(email);
+    return { success: true };
+  }
+
+  public async changePassword(
+    user: SupabaseUserPayload,
+    dto: ChangePasswordDto
+  ): Promise<SuccessResponseDto> {
+    if (dto.currentPassword === dto.newPassword) {
+      throw new BadRequestException(messages.password.SAME_AS_CURRENT);
+    }
+
+    if (!user.email) {
+      throw new UnauthorizedException(messages.auth.INVALID_TOKEN);
+    }
+
+    const anonClient = this.supabaseService.getAuthClient();
+    const { error: signInError } = await anonClient.auth.signInWithPassword({
+      email: user.email,
+      password: dto.currentPassword,
+    });
+
+    if (signInError) {
+      throw new UnauthorizedException(messages.password.CURRENT_INVALID);
+    }
+
+    const { error: updateError } = await this.client.auth.admin.updateUserById(user.sub, {
+      password: dto.newPassword,
+    });
+
+    if (updateError) {
+      throw new InternalServerErrorException(messages.password.UPDATE_FAILED);
+    }
+
     return { success: true };
   }
 

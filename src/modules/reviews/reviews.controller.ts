@@ -14,6 +14,7 @@ import { CreateReviewDto } from './dto/create-review.dto';
 import { CreateReviewResponseDto } from './dto/create-review-response.dto';
 import { ListReviewsQueryDto } from './dto/list-reviews-query.dto';
 import { ReviewsListResponseDto } from './dto/reviews-list-response.dto';
+import { ReviewsAnalyticsResponseDto } from './dto/reviews-analytics-response.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -45,7 +46,10 @@ export class ClientReviewsController {
   }
 
   @Get('barbers/:barberId/reviews')
-  @ApiOperation({ summary: 'Authenticated client views reviews for a barber — paginated, most recent first' })
+  @ApiOperation({
+    summary:
+      'Authenticated client views reviews for a barber — paginated, most recent first. Optionally filter by exact star rating (1..5).',
+  })
   @ApiResponse({
     status: 200,
     description: 'Reviews returned successfully',
@@ -68,7 +72,10 @@ export class BarberReviewsController {
   constructor(private readonly reviewsService: ReviewsService) {}
 
   @Get()
-  @ApiOperation({ summary: 'Authenticated barber views their own reviews — paginated, most recent first' })
+  @ApiOperation({
+    summary:
+      'Authenticated barber views their own reviews — paginated, most recent first. Optionally filter by exact star rating (1..5).',
+  })
   @ApiResponse({
     status: 200,
     description: 'Reviews returned successfully',
@@ -79,5 +86,21 @@ export class BarberReviewsController {
     @Query() query: ListReviewsQueryDto
   ): Promise<ReviewsListResponseDto> {
     return this.reviewsService.listReviewsForBarber(user.sub, query);
+  }
+
+  @Get('analytics')
+  @ApiOperation({
+    summary:
+      "Reviews analytics for the authenticated barber — totals, average, and per-star (1..5) count + percentage.",
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Analytics returned successfully',
+    type: ReviewsAnalyticsResponseDto,
+  })
+  public async getOwnAnalytics(
+    @CurrentUser() user: SupabaseUserPayload
+  ): Promise<ReviewsAnalyticsResponseDto> {
+    return this.reviewsService.getAnalyticsForBarber(user.sub);
   }
 }

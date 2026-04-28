@@ -17,10 +17,14 @@
   },
   "client": {
     "USERNAME_TAKEN": "Username already taken",
-    "PROFILE_LOAD_FAILED": "Failed to load client profile"
+    "PROFILE_LOAD_FAILED": "Failed to load client profile",
+    "PROFILE_UPDATE_FAILED": "Failed to update client profile",
+    "PROFILE_NOT_FOUND": "Client profile not found"
   },
   "password": {
-    "UPDATE_FAILED": "Failed to update password"
+    "UPDATE_FAILED": "Failed to update password",
+    "CURRENT_INVALID": "Current password is incorrect",
+    "SAME_AS_CURRENT": "New password must differ from the current one"
   },
   "validation": {
     "PHONE_INVALID": "phone must be a valid phone number (digits, spaces, dashes, parentheses, optional +)",

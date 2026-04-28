@@ -14,6 +14,10 @@ import {
   ReviewListItemDto,
   ReviewsListResponseDto,
 } from './dto/reviews-list-response.dto';
+import {
+  RatingBreakdownEntryDto,
+  ReviewsAnalyticsResponseDto,
+} from './dto/reviews-analytics-response.dto';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 50;
@@ -120,6 +124,10 @@ export class ReviewsService {
       .select('id, client_id, rating, comment, created_at')
       .eq('barber_id', barberId);
 
+    if (query.rating !== undefined) {
+      q = q.eq('rating', query.rating);
+    }
+
     if (cursorRow) {
       q = q.or(
         `created_at.lt.${cursorRow.created_at},and(created_at.eq.${cursorRow.created_at},id.lt.${cursorRow.id})`
@@ -167,6 +175,43 @@ export class ReviewsService {
       nextCursor: hasMore && pageRows.length > 0 ? pageRows[pageRows.length - 1].id : null,
       hasMore,
     };
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Analytics — total + average + per-star breakdown
+  // ────────────────────────────────────────────────────────────
+
+  public async getAnalyticsForBarber(barberId: string): Promise<ReviewsAnalyticsResponseDto> {
+    const barber = await this.fetchBarberSummary(barberId);
+    if (!barber) throw new NotFoundException('Barber not found');
+
+    const { data, error } = await this.db
+      .from('reviews')
+      .select('rating')
+      .eq('barber_id', barberId);
+
+    if (error) throw new InternalServerErrorException('Failed to fetch reviews analytics');
+
+    const ratings = (data ?? []) as Array<{ rating: number }>;
+    const totalReviews = ratings.length;
+
+    const counts = new Map<number, number>([[1, 0], [2, 0], [3, 0], [4, 0], [5, 0]]);
+    let sum = 0;
+    for (const row of ratings) {
+      const r = Number(row.rating);
+      if (counts.has(r)) counts.set(r, (counts.get(r) ?? 0) + 1);
+      sum += r;
+    }
+
+    const averageRating = totalReviews === 0 ? null : Math.round((sum / totalReviews) * 10) / 10;
+
+    const ratingsBreakdown: RatingBreakdownEntryDto[] = [5, 4, 3, 2, 1].map((rating) => {
+      const count = counts.get(rating) ?? 0;
+      const percentage = totalReviews === 0 ? 0 : Math.round((count / totalReviews) * 100);
+      return { rating, count, percentage };
+    });
+
+    return { totalReviews, averageRating, ratingsBreakdown };
   }
 
   // ────────────────────────────────────────────────────────────

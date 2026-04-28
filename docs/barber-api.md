@@ -21,7 +21,9 @@ This document covers every endpoint a barber user hits — from onboarding throu
 11. [Conversations / Messaging](#9-conversations--messaging)
 12. [Push Notifications](#10-push-notifications)
 13. [Notification Settings](#11-notification-settings)
-14. [Common Error Codes](#common-error-codes)
+14. [Analytics](#12-analytics)
+15. [Stripe Connect & No-Show Charges](#13-stripe-connect--no-show-charges)
+16. [Common Error Codes](#common-error-codes)
 
 ---
 
@@ -45,6 +47,7 @@ This document covers every endpoint a barber user hits — from onboarding throu
 - **Pagination:**
   - **Cursor-based** (bookings, recurring bookings, reviews, messages): pass `cursor=<id-of-last-item-from-previous-page>`. Response returns `nextCursor` + `hasMore`. `limit` default `20`, max `50`.
   - **Page-based** (notifications, conversations): pass `page=<n>` & `limit=<n>`. Response returns `pagination.{currentPage, totalPages, hasNextPage, ...}`. `limit` default `20`, max `100`.
+- **Stripe Connect deep links:** the Stripe-hosted onboarding page redirects to `APP_URL_BARBER/connect/return` on success and `APP_URL_BARBER/connect/refresh` if the link expired. Configure these as deep links in the Expo app and route both into a single "refresh status" screen that re-calls `GET /barbers/me/connect/status`.
 
 ---
 
@@ -199,11 +202,24 @@ Optional bio + photo. **Marks onboarding complete.**
   ```
 - **Response 201:** `{ "success": true }`.
 
+### 1.10 `PATCH /auth/change-password`
+
+Change password while signed in (re-authenticates with the current password before applying the new one).
+
+- **Auth:** required
+- **Body** (`ChangePasswordDto`):
+  | Field | Type | Required | Notes |
+  |---|---|---|---|
+  | `currentPassword` | string | yes | min 8 |
+  | `newPassword` | string | yes | min 8, must differ |
+- **Response 200:** `{ "success": true }`
+- Errors: `401` if `currentPassword` is wrong.
+
 ---
 
 ## 2. Profile
 
-`BarberProfileResponseDto` is returned from `/auth/barber/step3` and `/auth/me`.
+`BarberProfileResponseDto` is returned from `/auth/barber/step3`, `/auth/me`, `GET /barber/profile`, and `PATCH /barber/profile`.
 
 ```ts
 {
@@ -227,6 +243,36 @@ Optional bio + photo. **Marks onboarding complete.**
 ```
 
 > **Note:** Profile fields use `snake_case` here (this DTO surfaces the row directly). All other DTOs in this API use `camelCase`.
+
+### 2.1 `GET /barber/profile`
+
+Read the authenticated barber's full profile (same shape as `/auth/me` for barbers — kept as a dedicated endpoint so the mobile app can fetch the profile without going through the role-discriminated `/auth/me`).
+
+- **Auth:** required (barber)
+- **Response 200:** `BarberProfileResponseDto`
+
+### 2.2 `PATCH /barber/profile`
+
+Update any subset of profile fields. Send `multipart/form-data` if uploading a photo, otherwise `application/json` is accepted.
+
+- **Auth:** required (barber)
+- **Content-Type:** `multipart/form-data` *or* `application/json`
+- **Body fields** (all optional):
+  | Field | Type | Notes |
+  |---|---|---|
+  | `photo` | file | new profile photo, max 5 MB. Replaces the previous photo. |
+  | `fullName` | string | max 100 |
+  | `shopName` | string | max 100 |
+  | `phone` | string | regex `^[+\d\s\-()]+$` |
+  | `streetAddress` | string | max 200 |
+  | `city` | string | max 100 |
+  | `state` | string | max 50 |
+  | `zipCode` | string | `12345` or `12345-6789` |
+  | `latitude` | number | `-90..90` |
+  | `longitude` | number | `-180..180` |
+  | `bio` | string | max 500 |
+  | `instagramHandle` | string | letters/numbers/`._` only, no `@` |
+- **Response 200:** `BarberProfileResponseDto`
 
 ---
 
@@ -397,6 +443,19 @@ Master switch for recurring availability across the barber's profile (independen
 - **Auth:** required (barber)
 - **Body:** `{ "enabled": true }`
 - **Response 200:** `{ "recurringEnabled": boolean }`
+
+### 5.4 `PATCH /barber/settings/no-show-charge`
+
+Toggle the no-show charge feature and/or set its USD amount. **Requires a Stripe Connect account whose `charges_enabled` is `true`** — see [Section 13](#13-stripe-connect--no-show-charges).
+
+- **Auth:** required (barber)
+- **Body** (`UpdateNoShowChargeDto`):
+  | Field | Type | Required | Notes |
+  |---|---|---|---|
+  | `enabled` | boolean | yes | |
+  | `amountUsd` | number ≥ 0 | required when `enabled = true` | flat USD amount charged to the client's saved card on no-show |
+- **Response 200:** `{ "enabled": boolean, "amountUsd": number | null }`
+- Errors: `409 CONNECT_REQUIRED` when enabling without a Connect account in `charges_enabled = true` state.
 
 ---
 
@@ -607,7 +666,7 @@ Cancels the subscription. Future generated bookings are cancelled; past/complete
 
 ### 8.1 `GET /barber/reviews`
 
-The barber's own reviews, newest first.
+The barber's own reviews, newest first. Supports filtering by star rating to back the "All / 5★ / 4★ / 3★ / 2★ / 1★" tab strip.
 
 - **Auth:** required (barber)
 - **Query** (`ListReviewsQueryDto`):
@@ -615,14 +674,15 @@ The barber's own reviews, newest first.
   |---|---|---|---|
   | `cursor` | uuid | no | |
   | `limit` | 1..50 | no | default 20 |
+  | `rating` | int 1..5 | no | when set, only reviews with this exact star count are returned. Omit for "All". |
 - **Response 200** (`ReviewsListResponseDto`):
   ```ts
   {
     barber: {
       id: string;
       name: string;
-      averageRating: number | null;   // null when 0 reviews
-      totalReviews: number;
+      averageRating: number | null;   // null when 0 reviews — UNFILTERED average across all ratings
+      totalReviews: number;           // UNFILTERED total across all ratings (drives the "X total" header)
     };
     reviews: [{
       id: string;
@@ -636,6 +696,31 @@ The barber's own reviews, newest first.
     hasMore: boolean;
   }
   ```
+
+> The `barber.averageRating` and `barber.totalReviews` fields are computed from **all** reviews — they do not change when `rating` is set. Only the `reviews` array is filtered. Use `GET /barber/reviews/analytics` (8.2) to drive the per-star bars.
+
+### 8.2 `GET /barber/reviews/analytics`
+
+Aggregate breakdown for the reviews screen header (the bar chart with star-by-star counts in the screenshot).
+
+- **Auth:** required (barber)
+- **Query:** none
+- **Response 200** (`ReviewsAnalyticsResponseDto`):
+  ```ts
+  {
+    totalReviews: number;             // 7 → "7 total"
+    averageRating: number | null;     // 4.6 → big number on the left
+    ratingsBreakdown: [               // always 5 entries, ordered 5 → 1
+      { rating: 5, count: 5, percentage: 71 },
+      { rating: 4, count: 1, percentage: 14 },
+      { rating: 3, count: 1, percentage: 14 },
+      { rating: 2, count: 0, percentage: 0 },
+      { rating: 1, count: 0, percentage: 0 }
+    ];
+  }
+  ```
+  - `percentage` is a whole number (`Math.round((count / totalReviews) * 100)`). Use it directly as the bar fill width.
+  - When `totalReviews === 0`: `averageRating = null` and every breakdown entry has `count = 0, percentage = 0`.
 
 ---
 
@@ -802,6 +887,113 @@ Two independent toggles for what kinds of push notifications the barber receives
 
 ---
 
+## 12. Analytics
+
+### 12.1 `GET /bookings/analytics`
+
+Earnings analytics for the authenticated barber over a rolling window. Counts only `completed` bookings; no-show charges are **excluded**.
+
+- **Auth:** required (barber)
+- **Query** (`AnalyticsQueryDto`):
+  | Param | Type | Required | Notes |
+  |---|---|---|---|
+  | `period` | `'week' \| 'month' \| 'year'` | yes | rolling window ending now |
+- **Response 200** (`AnalyticsResponseDto`):
+  ```ts
+  {
+    period: 'week' | 'month' | 'year';
+    period_days: number;                  // 7 / 30 / 365
+    window_start: string;                 // ISO timestamp (UTC)
+    window_end: string;                   // ISO timestamp (UTC)
+    total_earnings_usd: number;           // sum across all completed bookings
+    standard_bookings: {
+      regular:     { count: number; total_usd: number };
+      after_hours: { count: number; total_usd: number };
+      day_off:     { count: number; total_usd: number };
+    };
+    recurring: {
+      total_occurrences_completed: number;
+      total_usd: number;
+      per_arrangement: [{
+        arrangement_id: string;           // recurring_booking id
+        client_name: string;
+        service_name: string;
+        day_of_week: number;              // 0..6
+        time_slot: string;                // 'HH:mm:ss'
+        frequency: 'weekly' | 'biweekly';
+        occurrences_completed: number;
+        total_usd: number;
+      }];
+    };
+  }
+  ```
+
+---
+
+## 13. Stripe Connect & No-Show Charges
+
+To bill clients for no-shows, a barber must connect a **Stripe Express** account. The platform creates the account on demand, sends the barber to a Stripe-hosted onboarding URL, and tracks the resulting capabilities. Once `chargesEnabled = true`, the barber can turn on no-show charges (Section 5.4); the no-show flow on `PATCH /barber/bookings/:id/no-show` will charge the client's saved card via the Connect account using a destination charge.
+
+> The mobile app **never collects or stores barber bank/SSN data**. All KYC happens on Stripe's hosted page.
+
+### Onboarding flow (mobile)
+
+1. App calls `POST /barbers/me/connect/onboard` → receives `onboardingUrl`.
+2. App opens that URL in an in-app browser (`expo-web-browser` `openAuthSessionAsync` is recommended) or system browser.
+3. Barber completes Stripe's KYC. Stripe redirects to:
+   - `APP_URL_BARBER/connect/return` — onboarding submitted (does **not** mean charges_enabled is true; verification can be pending).
+   - `APP_URL_BARBER/connect/refresh` — link expired or barber bailed out. Re-call `/onboard` to mint a fresh link.
+4. After redirect, the app calls `GET /barbers/me/connect/status` to read live capabilities.
+5. When `chargesEnabled === true`, the no-show toggle (`PATCH /barber/settings/no-show-charge`) becomes usable.
+
+`requirementsCurrentlyDue` lists fields Stripe is still asking for (e.g. `individual.dob.day`). Show them in the UI; if non-empty, route the barber back through `/onboard` to complete them.
+
+### 13.1 `POST /barbers/me/connect/onboard`
+
+Begin or resume Express onboarding. Creates the Connect account on first call (idempotent — subsequent calls return a fresh link for the same account).
+
+- **Auth:** required (barber)
+- **Body:** none
+- **Response 201** (`ConnectOnboardResponseDto`):
+  ```json
+  { "onboardingUrl": "https://connect.stripe.com/setup/e/acct_1Oj..." }
+  ```
+  The URL is one-time and expires after first use.
+
+### 13.2 `GET /barbers/me/connect/status`
+
+Live capabilities snapshot from Stripe (no caching — call after each redirect).
+
+- **Auth:** required (barber)
+- **Response 200** (`ConnectStatusResponseDto`):
+  ```ts
+  {
+    connected: boolean;                   // false ⇒ no Connect account on file
+    chargesEnabled: boolean;
+    payoutsEnabled: boolean;
+    requirementsCurrentlyDue: string[];   // empty when fully verified
+  }
+  ```
+
+### 13.3 `DELETE /barbers/me/connect`
+
+Disconnect (delete) the Express account. Idempotent. **Forces `no_show_charge_enabled = false`** so the barber cannot leave the toggle on without a backing account.
+
+- **Auth:** required (barber)
+- **Body:** none
+- **Response 200:** `{ "disconnected": true }`
+
+### What happens on a no-show
+
+When the barber calls `PATCH /barber/bookings/:id/no-show` (Section 6.6):
+
+- The booking is marked `no_show`.
+- If the no-show charge feature is enabled and the client has a saved card on their subscription, the system creates a Stripe `PaymentIntent` against the client's card with the destination set to the barber's Connect account.
+- The booking response surfaces the outcome via `noShowCharged` and `noShowChargeAmountUsd`. Skipped reasons (no card / no Connect / disabled / Connect not in `charges_enabled`) are logged but do not fail the no-show transition itself.
+- Booking detail (`GET /barber/bookings/:id`) reflects the updated charge fields after the webhook (`payment_intent.succeeded`) settles.
+
+---
+
 ## Common Error Codes
 
 | Status | Meaning | Typical cause |
@@ -810,8 +1002,12 @@ Two independent toggles for what kinds of push notifications the barber receives
 | 401 | Unauthorized | missing / expired access token; refresh and retry |
 | 403 | Forbidden | wrong role (e.g. client hitting `/barber/...`) |
 | 404 | Not found | id does not exist or belongs to another user |
-| 409 | Conflict | double booking, duplicate username, illegal state transition (e.g. confirming an already-cancelled booking) |
+| 409 | Conflict | double booking, duplicate username, illegal state transition (e.g. confirming an already-cancelled booking), `CONNECT_REQUIRED` when enabling no-show charge without a verified Connect account |
 | 500 | Server error | log and retry; report if persistent |
+
+Common application error codes (`code` field in the error envelope):
+- `SUBSCRIPTION_REQUIRED` — only used on the client side; included for completeness.
+- `CONNECT_REQUIRED` — `PATCH /barber/settings/no-show-charge` rejected because the Connect account is missing or not in `charges_enabled` state.
 
 The mobile app should treat `401` as a signal to call `POST /auth/refresh` once and retry, then fall back to logout if refresh also returns 401.
 
@@ -830,6 +1026,9 @@ The mobile app should treat `401` as a signal to call `POST /auth/refresh` once 
 | Auth | GET | `/auth/me` |
 | Auth | POST | `/auth/forgot-password` |
 | Auth | POST | `/auth/reset-password` |
+| Auth | PATCH | `/auth/change-password` |
+| Profile | GET | `/barber/profile` |
+| Profile | PATCH | `/barber/profile` |
 | Services | POST | `/barbers/:barberId/services` |
 | Services | GET | `/barbers/:barberId/services` |
 | Services | GET | `/barbers/:barberId/services/:serviceId` |
@@ -841,6 +1040,7 @@ The mobile app should treat `401` as a signal to call `POST /auth/refresh` once 
 | Settings | PATCH | `/barber/settings/auto-confirm` |
 | Settings | PATCH | `/barber/settings/auto-confirm-today` |
 | Settings | PATCH | `/barber/settings/recurring` |
+| Settings | PATCH | `/barber/settings/no-show-charge` |
 | Bookings | GET | `/barber/bookings` |
 | Bookings | GET | `/barber/bookings/:id` |
 | Bookings | PATCH | `/barber/bookings/:id/confirm` |
@@ -855,6 +1055,7 @@ The mobile app should treat `401` as a signal to call `POST /auth/refresh` once 
 | Recurring | PATCH | `/barber/recurring-bookings/:id/resume` |
 | Recurring | PATCH | `/barber/recurring-bookings/:id/cancel` |
 | Reviews | GET | `/barber/reviews` |
+| Reviews | GET | `/barber/reviews/analytics` |
 | Messages | GET | `/conversations` |
 | Messages | GET | `/conversations/:id/messages` |
 | Messages | POST | `/conversations/:id/messages` |
@@ -866,3 +1067,7 @@ The mobile app should treat `401` as a signal to call `POST /auth/refresh` once 
 | Notifications | PUT | `/barber/notifications/:notificationId/read` |
 | Notification settings | GET | `/barber/notification-settings` |
 | Notification settings | PUT | `/barber/notification-settings` |
+| Analytics | GET | `/bookings/analytics` |
+| Connect | POST | `/barbers/me/connect/onboard` |
+| Connect | GET | `/barbers/me/connect/status` |
+| Connect | DELETE | `/barbers/me/connect` |

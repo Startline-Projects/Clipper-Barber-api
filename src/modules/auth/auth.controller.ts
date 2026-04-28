@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Get,
+  Patch,
   Post,
   UploadedFile,
   UseGuards,
@@ -21,6 +22,7 @@ import { AuthService } from './auth.service';
 import { BarberStep1Dto } from './dto/barber-step1.dto';
 import { BarberStep2Dto } from './dto/barber-step2.dto';
 import { BarberStep3Dto } from './dto/barber-step3.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { ClientRegisterDto } from './dto/client-register.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
@@ -178,6 +180,23 @@ export class AuthController {
   @ApiResponse({ status: 201, description: 'Reset email dispatched', type: SuccessResponseDto })
   public forgotPassword(@Body('email') email: string): Promise<SuccessResponseDto> {
     return this.authService.forgotPassword(email);
+  }
+
+  @Patch('change-password')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Change password while authenticated (barber or client)',
+    description:
+      'Verifies the current password by re-authenticating, then updates the password via Supabase admin.',
+  })
+  @ApiBody({ type: ChangePasswordDto })
+  @ApiResponse({ status: 200, description: 'Password updated', type: SuccessResponseDto })
+  public changePassword(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Body() dto: ChangePasswordDto
+  ): Promise<SuccessResponseDto> {
+    return this.authService.changePassword(user, dto);
   }
 
   @Post('reset-password')

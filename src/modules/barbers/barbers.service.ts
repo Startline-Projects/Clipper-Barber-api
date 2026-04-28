@@ -1,3 +1,4 @@
+import 'multer';
 import {
   BadRequestException,
   Injectable,
@@ -12,6 +13,9 @@ import { BookingTypeDto } from '../bookings/dto/preview-booking.dto';
 import { NoShowService } from '../payments/no-show.service';
 import { ConnectService } from '../payments/connect.service';
 import { ConnectRequired } from '../payments/payments.exceptions';
+import { UpdateBarberProfileDto } from './dto/update-barber-profile.dto';
+import { BarberProfileResponseDto } from '../auth/dto/responses/barber-profile.response.dto';
+import messages from '../../common/messages.json';
 import {
   BookingStatusDto,
   BookingTimeframeDto,
@@ -525,6 +529,93 @@ export class BarbersService {
     if (!data) throw new NotFoundException('Barber profile not found');
 
     return { recurringEnabled: data.recurring_enabled as boolean };
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Barber profile — read / update
+  // ────────────────────────────────────────────────────────────
+
+  public async getProfile(barberId: string): Promise<BarberProfileResponseDto> {
+    const { data, error } = await this.db
+      .from('barbers')
+      .select('*')
+      .eq('user_id', barberId)
+      .maybeSingle();
+
+    if (error) throw new InternalServerErrorException(messages.barber.PROFILE_LOAD_FAILED);
+    if (!data) throw new NotFoundException('Barber profile not found');
+
+    return this.projectCanonicalId(data) as unknown as BarberProfileResponseDto;
+  }
+
+  public async updateProfile(
+    barberId: string,
+    dto: UpdateBarberProfileDto,
+    photo?: Express.Multer.File
+  ): Promise<BarberProfileResponseDto> {
+    const patch: Record<string, unknown> = {};
+
+    if (dto.fullName !== undefined) patch.full_name = dto.fullName;
+    if (dto.shopName !== undefined) patch.shop_name = dto.shopName;
+    if (dto.phone !== undefined) patch.phone = dto.phone;
+    if (dto.streetAddress !== undefined) patch.street_address = dto.streetAddress;
+    if (dto.city !== undefined) patch.city = dto.city;
+    if (dto.state !== undefined) patch.state = dto.state;
+    if (dto.zipCode !== undefined) patch.zip_code = dto.zipCode;
+    if (dto.latitude !== undefined) patch.latitude = dto.latitude;
+    if (dto.longitude !== undefined) patch.longitude = dto.longitude;
+    if (dto.bio !== undefined) patch.bio = dto.bio;
+    if (dto.instagramHandle !== undefined) patch.instagram_handle = dto.instagramHandle;
+
+    if (photo) {
+      patch.profile_photo_url = await this.uploadProfilePhoto(barberId, photo);
+    }
+
+    if (Object.keys(patch).length === 0) {
+      return this.getProfile(barberId);
+    }
+
+    const { data, error } = await this.db
+      .from('barbers')
+      .update(patch)
+      .eq('user_id', barberId)
+      .select('*')
+      .maybeSingle();
+
+    if (error) throw new InternalServerErrorException(messages.barber.PROFILE_UPDATE_FAILED);
+    if (!data) throw new NotFoundException('Barber profile not found');
+
+    if (dto.fullName !== undefined) {
+      await this.supabaseService.getClient().auth.admin.updateUserById(barberId, {
+        user_metadata: { full_name: dto.fullName },
+      });
+    }
+
+    return this.projectCanonicalId(data) as unknown as BarberProfileResponseDto;
+  }
+
+  private async uploadProfilePhoto(
+    barberId: string,
+    photo: Express.Multer.File
+  ): Promise<string> {
+    const ext = photo.mimetype.split('/')[1] ?? 'jpg';
+    const path = `${barberId}/profile.${ext}`;
+
+    const { error } = await this.db.storage
+      .from('profile-photos')
+      .upload(path, photo.buffer, { contentType: photo.mimetype, upsert: true });
+
+    if (error) throw new InternalServerErrorException(messages.barber.PHOTO_UPLOAD_FAILED);
+
+    const { data } = this.db.storage.from('profile-photos').getPublicUrl(path);
+    return data.publicUrl;
+  }
+
+  // Profile rows still carry both the internal `id` and `user_id`. Expose
+  // only the auth id under `id` so every API speaks the same identifier.
+  private projectCanonicalId(row: Record<string, unknown>): Record<string, unknown> {
+    const { id: _internalId, user_id, ...rest } = row;
+    return { id: user_id, ...rest };
   }
 
   // ────────────────────────────────────────────────────────────
