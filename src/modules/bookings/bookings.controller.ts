@@ -10,7 +10,14 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiOperation,
+  ApiQuery,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
 import { PreviewBookingDto } from './dto/preview-booking.dto';
 import { PreviewBookingResponseDto } from './dto/preview-booking-response.dto';
@@ -22,11 +29,14 @@ import { ClientPastBookingsResponseDto } from './dto/client-past-booking.dto';
 import { ClientBookingDetailResponseDto } from './dto/client-booking-detail.dto';
 import { ClientRecurringBookingsListResponseDto } from './recurring/dto/client-recurring-booking-list.dto';
 import { RecurringBookingsService } from './recurring/recurring.service';
+import { AnalyticsPeriodDto, AnalyticsQueryDto } from './dto/analytics-query.dto';
+import { AnalyticsResponseDto } from './dto/analytics-response.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { SupabaseUserPayload } from '../supabase/supabase.service';
+import { SubscriptionRequiredGuard } from '../payments/guards/subscription-required.guard';
 
 @ApiTags('Bookings')
 @ApiBearerAuth()
@@ -37,6 +47,7 @@ export class BookingsController {
 
   @Post('preview')
   @Roles('client')
+  @UseGuards(SubscriptionRequiredGuard)
   @HttpCode(200)
   @ApiOperation({ summary: 'Preview a booking with pricing breakdown — no row is created' })
   @ApiBody({ type: PreviewBookingDto })
@@ -54,6 +65,7 @@ export class BookingsController {
 
   @Post('confirm')
   @Roles('client')
+  @UseGuards(SubscriptionRequiredGuard)
   @ApiOperation({ summary: 'Confirm a previewed booking — inserts a booking row' })
   @ApiBody({ type: PreviewBookingDto })
   @ApiResponse({
@@ -67,6 +79,22 @@ export class BookingsController {
   ): Promise<ConfirmBookingResponseDto> {
     return this.bookingsService.confirmBooking(user.sub, dto);
   }
+
+  @Get('analytics')
+  @Roles('barber')
+  @ApiOperation({
+    summary:
+      'Earnings analytics for the authenticated barber over the chosen rolling window. Counts only completed bookings; no-show charges are excluded.',
+  })
+  @ApiQuery({ name: 'period', enum: AnalyticsPeriodDto, example: AnalyticsPeriodDto.WEEK })
+  @ApiResponse({ status: 200, type: AnalyticsResponseDto })
+  public async getAnalytics(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Query() query: AnalyticsQueryDto
+  ): Promise<AnalyticsResponseDto> {
+    const result = await this.bookingsService.getAnalytics(user.sub, query.period);
+    return result as unknown as AnalyticsResponseDto;
+  }
 }
 
 @ApiTags('Client Bookings')
@@ -77,7 +105,7 @@ export class BookingsController {
 export class ClientBookingsController {
   constructor(
     private readonly bookingsService: BookingsService,
-    private readonly recurringService: RecurringBookingsService,
+    private readonly recurringService: RecurringBookingsService
   ) {}
 
   @Get('upcoming')
@@ -88,7 +116,7 @@ export class ClientBookingsController {
   @ApiResponse({ status: 200, type: ClientUpcomingBookingsResponseDto })
   public async listUpcomingBookings(
     @CurrentUser() user: SupabaseUserPayload,
-    @Query() query: ClientBookingsPageQueryDto,
+    @Query() query: ClientBookingsPageQueryDto
   ): Promise<ClientUpcomingBookingsResponseDto> {
     return this.bookingsService.listClientUpcomingBookings(user.sub, query);
   }
@@ -100,7 +128,7 @@ export class ClientBookingsController {
   @ApiResponse({ status: 200, type: ClientPastBookingsResponseDto })
   public async listPastBookings(
     @CurrentUser() user: SupabaseUserPayload,
-    @Query() query: ClientBookingsPageQueryDto,
+    @Query() query: ClientBookingsPageQueryDto
   ): Promise<ClientPastBookingsResponseDto> {
     return this.bookingsService.listClientPastBookings(user.sub, query);
   }
@@ -113,7 +141,7 @@ export class ClientBookingsController {
   @ApiResponse({ status: 200, type: ClientRecurringBookingsListResponseDto })
   public async listRecurringBookings(
     @CurrentUser() user: SupabaseUserPayload,
-    @Query() query: ClientBookingsPageQueryDto,
+    @Query() query: ClientBookingsPageQueryDto
   ): Promise<ClientRecurringBookingsListResponseDto> {
     return this.recurringService.listClientRecurringForClient(user.sub, query);
   }

@@ -15,6 +15,7 @@ import { RolesGuard } from '../../auth/guards/roles.guard';
 import { Roles } from '../../auth/decorators/roles.decorator';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { SupabaseUserPayload } from '../../supabase/supabase.service';
+import { SubscriptionRequiredGuard } from '../../payments/guards/subscription-required.guard';
 import { RecurringBookingsService } from './recurring.service';
 import { GetRecurringSlotsQueryDto } from './dto/get-recurring-slots-query.dto';
 import { RecurringSlotsResponseDto } from './dto/recurring-slots-response.dto';
@@ -35,16 +36,19 @@ export class ClientRecurringBookingsController {
   constructor(protected readonly recurringService: RecurringBookingsService) {}
 
   @Get()
-  @ApiOperation({ summary: "List the authenticated client's recurring bookings with cursor pagination." })
+  @ApiOperation({
+    summary: "List the authenticated client's recurring bookings with cursor pagination.",
+  })
   @ApiResponse({ status: 200, type: RecurringBookingsListResponseDto })
   public async listRecurringBookings(
     @CurrentUser() user: SupabaseUserPayload,
-    @Query() query: ListRecurringBookingsQueryDto,
+    @Query() query: ListRecurringBookingsQueryDto
   ): Promise<RecurringBookingsListResponseDto> {
     return this.recurringService.listRecurringBookingsForClient(user.sub, query);
   }
 
   @Post()
+  @UseGuards(SubscriptionRequiredGuard)
   @ApiOperation({
     summary:
       'Submit a recurring booking request to the barber. No appointment rows are created until the barber accepts.',
@@ -53,7 +57,7 @@ export class ClientRecurringBookingsController {
   @ApiResponse({ status: 201, type: RecurringBookingResponseDto })
   public async createRecurringBooking(
     @CurrentUser() user: SupabaseUserPayload,
-    @Body() dto: CreateRecurringBookingDto,
+    @Body() dto: CreateRecurringBookingDto
   ): Promise<RecurringBookingResponseDto> {
     return this.recurringService.createRecurringBooking(user.sub, dto);
   }
@@ -66,19 +70,21 @@ export class ClientRecurringBookingsController {
   @ApiResponse({ status: 200, type: RecurringBookingDetailResponseDto })
   public async getRecurringBooking(
     @CurrentUser() user: SupabaseUserPayload,
-    @Param('id', ParseUUIDPipe) id: string,
+    @Param('id', ParseUUIDPipe) id: string
   ): Promise<RecurringBookingDetailResponseDto> {
     return this.recurringService.getRecurringBookingForClient(user.sub, id);
   }
 
   @Patch(':id/pause')
-  @ApiOperation({ summary: 'Client pauses their recurring booking for a date range or indefinitely.' })
+  @ApiOperation({
+    summary: 'Client pauses their recurring booking for a date range or indefinitely.',
+  })
   @ApiBody({ type: PauseRecurringBookingDto })
   @ApiResponse({ status: 200, type: RecurringBookingResponseDto })
   public async pause(
     @CurrentUser() user: SupabaseUserPayload,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: PauseRecurringBookingDto,
+    @Body() dto: PauseRecurringBookingDto
   ): Promise<RecurringBookingResponseDto> {
     return this.recurringService.pauseRecurringBooking(user.sub, 'client', id, dto);
   }
@@ -88,7 +94,7 @@ export class ClientRecurringBookingsController {
   @ApiResponse({ status: 200, type: RecurringBookingResponseDto })
   public async resume(
     @CurrentUser() user: SupabaseUserPayload,
-    @Param('id', ParseUUIDPipe) id: string,
+    @Param('id', ParseUUIDPipe) id: string
   ): Promise<RecurringBookingResponseDto> {
     return this.recurringService.resumeRecurringBooking(user.sub, 'client', id);
   }
@@ -101,7 +107,7 @@ export class ClientRecurringBookingsController {
   @ApiResponse({ status: 200, type: RecurringBookingResponseDto })
   public async cancel(
     @CurrentUser() user: SupabaseUserPayload,
-    @Param('id', ParseUUIDPipe) id: string,
+    @Param('id', ParseUUIDPipe) id: string
   ): Promise<RecurringBookingResponseDto> {
     return this.recurringService.cancelRecurringBooking(user.sub, 'client', id);
   }
@@ -114,7 +120,7 @@ export class ClientRecurringBookingsController {
   @ApiResponse({ status: 201, type: RecurringBookingResponseDto })
   public async renew(
     @CurrentUser() user: SupabaseUserPayload,
-    @Param('id', ParseUUIDPipe) id: string,
+    @Param('id', ParseUUIDPipe) id: string
   ): Promise<RecurringBookingResponseDto> {
     return this.recurringService.renewRecurringBooking(user.sub, id);
   }
@@ -129,6 +135,7 @@ export class ClientRecurringSlotsController {
   constructor(protected readonly recurringService: RecurringBookingsService) {}
 
   @Get('recurring-slots')
+  @UseGuards(SubscriptionRequiredGuard)
   @ApiOperation({
     summary:
       'List recurring-eligible slot times for a given barber/service/day, plus the exact recurring price and allowed frequencies. Returns recurringAvailable=false when the day does not support recurring — no error is thrown.',
@@ -136,7 +143,7 @@ export class ClientRecurringSlotsController {
   @ApiResponse({ status: 200, type: RecurringSlotsResponseDto })
   public async getRecurringSlots(
     @Param('barberId', ParseUUIDPipe) barberId: string,
-    @Query() query: GetRecurringSlotsQueryDto,
+    @Query() query: GetRecurringSlotsQueryDto
   ): Promise<RecurringSlotsResponseDto> {
     return this.recurringService.getRecurringSlots(barberId, query.serviceIds, query.dayOfWeek);
   }
@@ -158,7 +165,7 @@ export class BarberRecurringBookingsController {
   @ApiResponse({ status: 200, type: RecurringBookingsListResponseDto })
   public async listRecurringBookings(
     @CurrentUser() user: SupabaseUserPayload,
-    @Query() query: ListRecurringBookingsQueryDto,
+    @Query() query: ListRecurringBookingsQueryDto
   ): Promise<RecurringBookingsListResponseDto> {
     return this.recurringService.listRecurringBookingsForBarber(user.sub, query);
   }
@@ -171,7 +178,7 @@ export class BarberRecurringBookingsController {
   @ApiResponse({ status: 200, type: RecurringBookingDetailResponseDto })
   public async getRecurringBooking(
     @CurrentUser() user: SupabaseUserPayload,
-    @Param('id', ParseUUIDPipe) id: string,
+    @Param('id', ParseUUIDPipe) id: string
   ): Promise<RecurringBookingDetailResponseDto> {
     return this.recurringService.getRecurringBookingForBarber(user.sub, id);
   }
@@ -184,7 +191,7 @@ export class BarberRecurringBookingsController {
   @ApiResponse({ status: 200, type: RecurringBookingResponseDto })
   public async accept(
     @CurrentUser() user: SupabaseUserPayload,
-    @Param('id', ParseUUIDPipe) id: string,
+    @Param('id', ParseUUIDPipe) id: string
   ): Promise<RecurringBookingResponseDto> {
     return this.recurringService.acceptRecurringBooking(user.sub, id);
   }
@@ -196,7 +203,7 @@ export class BarberRecurringBookingsController {
   public async decline(
     @CurrentUser() user: SupabaseUserPayload,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: DeclineRecurringBookingDto,
+    @Body() dto: DeclineRecurringBookingDto
   ): Promise<RecurringBookingResponseDto> {
     return this.recurringService.declineRecurringBooking(user.sub, id, dto);
   }
@@ -208,7 +215,7 @@ export class BarberRecurringBookingsController {
   public async pause(
     @CurrentUser() user: SupabaseUserPayload,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: PauseRecurringBookingDto,
+    @Body() dto: PauseRecurringBookingDto
   ): Promise<RecurringBookingResponseDto> {
     return this.recurringService.pauseRecurringBooking(user.sub, 'barber', id, dto);
   }
@@ -218,7 +225,7 @@ export class BarberRecurringBookingsController {
   @ApiResponse({ status: 200, type: RecurringBookingResponseDto })
   public async resume(
     @CurrentUser() user: SupabaseUserPayload,
-    @Param('id', ParseUUIDPipe) id: string,
+    @Param('id', ParseUUIDPipe) id: string
   ): Promise<RecurringBookingResponseDto> {
     return this.recurringService.resumeRecurringBooking(user.sub, 'barber', id);
   }
@@ -231,7 +238,7 @@ export class BarberRecurringBookingsController {
   @ApiResponse({ status: 200, type: RecurringBookingResponseDto })
   public async cancel(
     @CurrentUser() user: SupabaseUserPayload,
-    @Param('id', ParseUUIDPipe) id: string,
+    @Param('id', ParseUUIDPipe) id: string
   ): Promise<RecurringBookingResponseDto> {
     return this.recurringService.cancelRecurringBooking(user.sub, 'barber', id);
   }

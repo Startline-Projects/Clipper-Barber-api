@@ -1,268 +1,313 @@
 # Barber API Reference
 
-Target audience: the mobile barber app. Integration reference for every endpoint a barber user hits, from onboarding through day-to-day operations.
+Target audience: the mobile **barber app** (developers integrating the React Native / Expo barber-side client).
+
+This document covers every endpoint a barber user hits — from onboarding through day-to-day operations: managing services, schedule, bookings, recurring subscriptions, reviews, conversations, and notifications.
+
+---
+
+## Table of Contents
+
+1. [Conventions](#conventions)
+2. [Shared Enums](#shared-enums)
+3. [Auth & Onboarding](#1-auth--onboarding)
+4. [Profile](#2-profile)
+5. [Services](#3-services)
+6. [Schedule](#4-schedule)
+7. [Settings](#5-settings)
+8. [Bookings (one-off)](#6-bookings-one-off)
+9. [Recurring Bookings](#7-recurring-bookings)
+10. [Reviews](#8-reviews)
+11. [Conversations / Messaging](#9-conversations--messaging)
+12. [Push Notifications](#10-push-notifications)
+13. [Notification Settings](#11-notification-settings)
+14. [Analytics](#12-analytics)
+15. [Stripe Connect & No-Show Charges](#13-stripe-connect--no-show-charges)
+16. [Common Error Codes](#common-error-codes)
+
+---
 
 ## Conventions
 
-- **Base URL:** `http://localhost:3001` (dev). Production URL set per environment.
-- **Auth:** `Authorization: Bearer <accessToken>` on every call marked `auth: JWT`.
-- **Role gating:** `role: barber` endpoints reject other roles with `403`. Role is carried in the JWT's `user_metadata.role`.
-- **Content type:** `application/json` unless noted otherwise (Step 3 onboarding uses `multipart/form-data`).
-- **Dates:** Times use `HH:mm` 24-hour. Calendar dates use `YYYY-MM-DD`. Timestamps in responses are ISO 8601 UTC.
-- **Error shape:** Global filter produces `{ error: true, message: string, code?: string }`. Validation errors return `400`; auth failures `401`; role failures `403`; not found `404`; unique conflict `409`.
-- **Pagination:** Cursor-based. Pass `cursor=<id-of-last-item>` and `limit` (default 20, max 50). Response carries `nextCursor` + `hasMore`.
+- **Base URL:** `http://localhost:3000` (dev). Production URL is environment-specific. Swagger UI is exposed at `/api/docs` outside production.
+- **Auth header:** `Authorization: Bearer <accessToken>` on every endpoint marked **Auth: required**. Tokens are issued by Supabase Auth.
+- **Role gating:** Endpoints under `role: barber` reject other roles with HTTP `403`. The role is read from the JWT `user_metadata.role` claim, so the mobile app does **not** send the role on protected calls — only on `POST /auth/login`.
+- **Content type:** `application/json` for everything *except* `POST /auth/barber/step3` which uses `multipart/form-data`.
+- **Date / time format:**
+  - Calendar dates: `YYYY-MM-DD` (in the barber's local timezone).
+  - Times of day: `HH:mm` (24-hour, in the barber's local timezone).
+  - Timestamps (`createdAt`, `scheduledAt`, etc.): ISO 8601 UTC, e.g. `2026-04-25T14:30:00.000Z`.
+- **`dayOfWeek`** is `0..6` where `0 = Sunday` and `6 = Saturday`.
+- **Validation:** A global `ValidationPipe` strips unknown fields and rejects extras with `400`. Always send keys exactly as documented.
+- **Error shape (global filter):**
+  ```json
+  { "error": true, "message": "Human-readable message", "code": "OPTIONAL_CODE" }
+  ```
+  - `400` validation, `401` auth missing/invalid, `403` role mismatch, `404` not found, `409` conflict (e.g. double booking, unique violation), `500` server error.
+- **Pagination:**
+  - **Cursor-based** (bookings, recurring bookings, reviews, messages): pass `cursor=<id-of-last-item-from-previous-page>`. Response returns `nextCursor` + `hasMore`. `limit` default `20`, max `50`.
+  - **Page-based** (notifications, conversations): pass `page=<n>` & `limit=<n>`. Response returns `pagination.{currentPage, totalPages, hasNextPage, ...}`. `limit` default `20`, max `100`.
+- **Stripe Connect deep links:** the Stripe-hosted onboarding page redirects to `APP_URL_BARBER/connect/return` on success and `APP_URL_BARBER/connect/refresh` if the link expired. Configure these as deep links in the Expo app and route both into a single "refresh status" screen that re-calls `GET /barbers/me/connect/status`.
 
 ---
 
 ## Shared Enums
 
 ```ts
+// Service types
 ServiceType         = 'haircut' | 'beard' | 'haircut_beard' | 'eyebrows' | 'other'
+
+// Booking pricing tier
 BookingType         = 'regular' | 'after_hours' | 'day_off'
+
+// Booking lifecycle
 BookingStatus       = 'pending' | 'confirmed' | 'completed' | 'cancelled' | 'no_show'
+
+// List filters
 BookingTimeframe    = 'upcoming' | 'past'
 BookingTypeFilter   = 'one_off' | 'recurring'
+
+// Service / slot durations (minutes)
 DurationMinutes     = 15 | 30 | 45 | 60
-SlotDurationMinutes = 15 | 30 | 45 | 60
-RecurringFrequency  = 'weekly' | 'biweekly'                // on a subscription
-RecurringFreqOption = 'weekly' | 'biweekly' | 'both'       // on a schedule day
+
+// Recurring
+RecurringFrequency      = 'weekly' | 'biweekly'                  // chosen on a subscription
+RecurringFrequencyOption = 'weekly' | 'biweekly' | 'both'        // configured on a schedule day
 RecurringStatus     = 'pending_barber_approval' | 'active' | 'paused' | 'cancelled' | 'expired'
+
+// Other
 CancelledBy         = 'client' | 'barber'
-DayOfWeek           = 0..6                                 // 0 = Sunday, 6 = Saturday
+DevicePlatform      = 'ios' | 'android'
+
+// Notification types pushed to the barber:
+NotificationType    =
+    | 'new_booking'
+    | 'cancelled_booking'
+    | 'new_recurring_request'
+    | 'recurring_cancelled'
+    | 'recurring_paused'
+    | 'new_message'
+    // The next ones target the client side, listed for completeness:
+    | 'booking_confirmed'
+    | 'booking_cancelled'
+    | 'recurring_accepted'
+    | 'recurring_refused'
+    | 'recurring_expiring'
 ```
 
 ---
 
-# 1. Onboarding (Auth)
+## 1. Auth & Onboarding
 
-## 1.1. `POST /auth/barber/step1` — create account
+Barber onboarding is a 3-step flow. Steps 2 and 3 require the access token issued by step 1.
 
-- **Context:** Creates Supabase auth user (role = barber) + an empty `barbers` profile row. Returns tokens so the app can authenticate step 2 and step 3.
-- **Auth:** none.
-- **Request:**
+### 1.1 `POST /auth/barber/step1`
+
+Create the auth account.
+
+- **Auth:** none
+- **Body:**
+  | Field | Type | Required | Notes |
+  |---|---|---|---|
+  | `fullName` | string | yes | max 100 |
+  | `email` | string | yes | valid email |
+  | `password` | string | yes | min 8 chars |
+- **Response 201** `TokensResponseDto`:
   ```json
-  {
-    "fullName": "John Doe",
-    "email": "barber@example.com",
-    "password": "SecurePass1!"
-  }
+  { "accessToken": "<jwt>", "refreshToken": "<jwt>" }
   ```
-- **Validation:** `fullName` ≤ 100 chars, valid email, password ≥ 8 chars.
-- **Response 201:** `{ "accessToken": "…", "refreshToken": "…" }`
 
-## 1.2. `POST /auth/barber/step2` — shop details
+### 1.2 `POST /auth/barber/step2`
 
-- **Context:** Writes shop address + coordinates onto the barber row.
-- **Auth:** JWT (from step 1). Role: barber.
-- **Request:**
-  ```json
-  {
-    "shopName": "The Fade Factory",
-    "phone": "+1 (555) 123-4567",
-    "streetAddress": "123 Main St",
-    "city": "Austin",
-    "state": "TX",
-    "zipCode": "78701",
-    "latitude": 30.2672,
-    "longitude": -97.7431
-  }
-  ```
-- **Validation:** phone must match `^[+\d\s\-()]+$`; zip `^\d{5}(-\d{4})?$`; lat `-90..90`; lng `-180..180`.
+Save shop info (used for discovery + maps).
+
+- **Auth:** required (barber role)
+- **Body:**
+  | Field | Type | Required | Notes |
+  |---|---|---|---|
+  | `shopName` | string | yes | max 100 |
+  | `phone` | string | yes | regex `^[+\d\s\-()]+$` |
+  | `streetAddress` | string | yes | max 200 |
+  | `city` | string | yes | max 100 |
+  | `state` | string | yes | max 50 |
+  | `zipCode` | string | yes | `12345` or `12345-6789` |
+  | `latitude` | number | yes | `-90..90` |
+  | `longitude` | number | yes | `-180..180` |
 - **Response 201:** `{ "success": true }`
 
-## 1.3. `POST /auth/barber/step3` — profile photo + bio
+### 1.3 `POST /auth/barber/step3`
 
-- **Context:** Finalises onboarding. Uploads an optional photo to Supabase Storage and marks `onboarding_complete = true`.
-- **Auth:** JWT. Role: barber.
-- **Content-Type:** `multipart/form-data`.
-- **Fields:**
+Optional bio + photo. **Marks onboarding complete.**
 
-  | Field | Type | Notes |
-  |---|---|---|
-  | `photo` | binary, optional | Max 5 MB |
-  | `bio` | string, optional | Max 500 chars |
-  | `instagramHandle` | string, optional | No `@`; matches `[a-zA-Z0-9._]+`, max 50 |
+- **Auth:** required (barber role)
+- **Content-Type:** `multipart/form-data`
+- **Body fields:**
+  | Field | Type | Required | Notes |
+  |---|---|---|---|
+  | `photo` | file | no | profile photo, max 5 MB |
+  | `bio` | string | no | max 500 |
+  | `instagramHandle` | string | no | letters/numbers/`._` only, no `@` |
+- **Response 201:** `BarberProfileResponseDto` (see [Profile](#2-profile)).
 
-- **Response 201:** `BarberProfile` (snake_case fields — see `BarberProfileResponseDto`):
+### 1.4 `POST /auth/login`
+
+- **Auth:** none
+- **Body:**
+  | Field | Type | Required | Notes |
+  |---|---|---|---|
+  | `email` | string | yes | |
+  | `password` | string | yes | min 8 |
+  | `role` | `'barber' \| 'client'` | yes | sent by the app, not the user |
+- **Response 201** `LoginResponseDto`:
   ```json
   {
-    "id": "uuid",
-    "full_name": "John Doe",
-    "shop_name": "The Fade Factory",
-    "phone": "+15551234567",
-    "street_address": "…",
-    "city": "…",
-    "state": "TX",
-    "zip_code": "78701",
-    "latitude": 30.2672,
-    "longitude": -97.7431,
-    "bio": "…",
-    "instagram_handle": "john.cuts",
-    "profile_photo_url": "https://…",
-    "onboarding_step": 3,
-    "onboarding_complete": true,
-    "created_at": "2026-04-20T12:00:00.000Z"
-  }
-  ```
-
-## 1.4. `POST /auth/login` — log in
-
-- **Context:** Shared with clients; app passes `role`.
-- **Auth:** none.
-- **Request:**
-  ```json
-  { "email": "barber@example.com", "password": "SecurePass1!", "role": "barber" }
-  ```
-- **Response 201:**
-  ```json
-  {
-    "accessToken": "…",
-    "refreshToken": "…",
-    "id": "uuid",
+    "accessToken": "<jwt>",
+    "refreshToken": "<jwt>",
+    "id": "<user-uuid>",
     "email": "barber@example.com",
     "username": "John Doe",
-    "redirectTo": "barber/step2"
+    "redirectTo": "barber/step2"   // ONLY when onboarding is incomplete
   }
   ```
-  `redirectTo` is only present when onboarding is incomplete. Values: `"barber/step2"`, `"barber/step3"`.
+  If `redirectTo` is present, route the user back into onboarding at that step instead of the home screen.
 
-## 1.5. `POST /auth/refresh` — refresh access token
+### 1.5 `POST /auth/refresh`
 
-- **Auth:** none.
-- **Request:** `{ "refreshToken": "…" }`
-- **Response 201:** `{ "accessToken": "…", "refreshToken": "…" }`
+- **Body:** `{ "refreshToken": "<jwt>" }`
+- **Response 201:** `TokensResponseDto`.
 
-## 1.6. `POST /auth/logout`
+### 1.6 `POST /auth/logout`
 
-- **Auth:** JWT.
-- **Response 201:** `{ "success": true }`
+- **Auth:** required
+- **Body:** none
+- **Response 201:** `{ "success": true }`. Server-side session invalidated. The mobile app should also call `DELETE /device-token` to remove the push token.
 
-## 1.7. `GET /auth/me`
+### 1.7 `GET /auth/me`
 
-- **Context:** Returns the barber (or client) profile for the JWT holder.
-- **Auth:** JWT.
-- **Response 201 for barber:** `BarberProfile` (same shape as 1.3).
+- **Auth:** required
+- **Response:** Returns `BarberProfileResponseDto` for barbers, the client profile object for clients.
 
-## 1.8. `POST /auth/forgot-password`
+### 1.8 `POST /auth/forgot-password`
 
-- **Request:** `{ "email": "barber@example.com" }`
-- **Response 201:** `{ "success": true }` (always — no email enumeration).
+- **Auth:** none
+- **Body:** `{ "email": "user@example.com" }`
+- **Response 201:** `{ "success": true }` (always success — prevents email enumeration).
 
-## 1.9. `POST /auth/reset-password`
+### 1.9 `POST /auth/reset-password`
 
-- **Request:** `{ "token": "<token_hash from email link>", "newPassword": "NewSecurePass1!" }`
-- **Response 201:** `{ "success": true }`
+- **Auth:** none
+- **Body:**
+  ```json
+  { "token": "<token_hash from email link>", "newPassword": "NewSecurePass1!" }
+  ```
+- **Response 201:** `{ "success": true }`.
+
+### 1.10 `PATCH /auth/change-password`
+
+Change password while signed in (re-authenticates with the current password before applying the new one).
+
+- **Auth:** required
+- **Body** (`ChangePasswordDto`):
+  | Field | Type | Required | Notes |
+  |---|---|---|---|
+  | `currentPassword` | string | yes | min 8 |
+  | `newPassword` | string | yes | min 8, must differ |
+- **Response 200:** `{ "success": true }`
+- Errors: `401` if `currentPassword` is wrong.
 
 ---
 
-# 2. Schedule
+## 2. Profile
 
-Every barber is seeded with 7 rows (Sun=0 .. Sat=6) on signup. All fields are partially updatable via PATCH.
+`BarberProfileResponseDto` is returned from `/auth/barber/step3`, `/auth/me`, `GET /barber/profile`, and `PATCH /barber/profile`.
 
-## 2.1. `GET /schedule` — list all 7 days
-
-- **Auth:** JWT. Role: barber.
-- **Response 200:** `{ "success": true, "data": ScheduleDay[] }`
-
-`ScheduleDay`:
 ```ts
 {
-  id: string;
-  barberId: string;
-  dayOfWeek: 0..6;                 // 0 = Sunday, 6 = Saturday
-  isWorking: boolean;
-  regularStartTime: "HH:mm" | null;
-  regularEndTime:   "HH:mm" | null;
-  slotDurationMinutes: 15 | 30 | 45 | 60;
-  afterHoursEnabled: boolean;
-  afterHoursStart: "HH:mm" | null;
-  afterHoursEnd:   "HH:mm" | null;
-  dayOffBookingEnabled: boolean;
-  dayOffStartTime: "HH:mm" | null;
-  dayOffEndTime:   "HH:mm" | null;
-  advanceNoticeMinutes: number;            // min minutes before slot that a booking can be placed
-  recurringEnabled: boolean;
-  recurringFrequency: 'weekly'|'biweekly'|'both' | null;
-  recurringExtraChargeUsd: number | null;  // flat surcharge added to service.recurringPriceUsd for this day
-  createdAt: string;
-  updatedAt: string;
+  id: string;                     // = auth.users.id
+  full_name: string;
+  shop_name: string;
+  phone?: string;
+  street_address?: string;
+  city?: string;
+  state?: string;
+  zip_code?: string;
+  latitude?: number;
+  longitude?: number;
+  bio?: string;
+  instagram_handle?: string;
+  profile_photo_url?: string;
+  onboarding_step: number;        // 1 | 2 | 3
+  onboarding_complete: boolean;
+  created_at: string;             // ISO timestamp
 }
 ```
 
-## 2.2. `PATCH /schedule/:dayOfWeek` — partial update
+> **Note:** Profile fields use `snake_case` here (this DTO surfaces the row directly). All other DTOs in this API use `camelCase`.
 
-- **Path param:** `dayOfWeek` = `0..6`.
-- **Auth:** JWT. Role: barber.
-- **Request — any subset of the fields below:**
+### 2.1 `GET /barber/profile`
 
+Read the authenticated barber's full profile (same shape as `/auth/me` for barbers — kept as a dedicated endpoint so the mobile app can fetch the profile without going through the role-discriminated `/auth/me`).
+
+- **Auth:** required (barber)
+- **Response 200:** `BarberProfileResponseDto`
+
+### 2.2 `PATCH /barber/profile`
+
+Update any subset of profile fields. Send `multipart/form-data` if uploading a photo, otherwise `application/json` is accepted.
+
+- **Auth:** required (barber)
+- **Content-Type:** `multipart/form-data` *or* `application/json`
+- **Body fields** (all optional):
   | Field | Type | Notes |
   |---|---|---|
-  | `isWorking` | boolean | |
-  | `regularStartTime`, `regularEndTime` | `HH:mm` | required when `isWorking=true` |
-  | `slotDurationMinutes` | 15/30/45/60 | |
-  | `afterHoursEnabled` | boolean | |
-  | `afterHoursStart`, `afterHoursEnd` | `HH:mm` | required when `afterHoursEnabled=true`; start ≥ regularEnd |
-  | `dayOffBookingEnabled` | boolean | cannot coexist with `isWorking=true` |
-  | `dayOffStartTime`, `dayOffEndTime` | `HH:mm` | required when `dayOffBookingEnabled=true` |
-  | `advanceNoticeMinutes` | int ≥ 0 | |
-  | `recurringEnabled` | boolean | setting to `false` clears `recurringFrequency` + `recurringExtraChargeUsd` |
-  | `recurringFrequency` | `weekly\|biweekly\|both` | required when `recurringEnabled=true` |
-  | `recurringExtraChargeUsd` | number ≥ 0 | optional surcharge; null ⇒ no extra charge |
-
-- **Side effect:** `barbers.recurring_enabled` is auto-synced — true iff any day has `recurringEnabled=true`.
-- **Response 200:** `{ "success": true, "data": ScheduleDay }`
+  | `photo` | file | new profile photo, max 5 MB. Replaces the previous photo. |
+  | `fullName` | string | max 100 |
+  | `shopName` | string | max 100 |
+  | `phone` | string | regex `^[+\d\s\-()]+$` |
+  | `streetAddress` | string | max 200 |
+  | `city` | string | max 100 |
+  | `state` | string | max 50 |
+  | `zipCode` | string | `12345` or `12345-6789` |
+  | `latitude` | number | `-90..90` |
+  | `longitude` | number | `-180..180` |
+  | `bio` | string | max 500 |
+  | `instagramHandle` | string | letters/numbers/`._` only, no `@` |
+- **Response 200:** `BarberProfileResponseDto`
 
 ---
 
-# 3. Services (CRUD)
+## 3. Services
 
-All endpoints live under `/barbers/:barberId/services/*`. `barberId` is always the authenticated barber's `auth.users.id` — the service enforces ownership.
+A barber configures services (haircut, beard, etc.) with prices for each booking tier. All routes are scoped under `:barberId` — clients pass the barber's id; the barber pass their own id (the service still authorises against the JWT).
 
-## 3.1. `POST /barbers/:barberId/services` — create
+### 3.1 `POST /barbers/:barberId/services`
 
-- **Auth:** JWT. Role: barber.
-- **Request:**
-  ```json
-  {
-    "name": "Skin Fade",
-    "serviceType": "haircut",
-    "durationMinutes": 30,
-    "regularPriceUsd": 35.00,
-    "afterHoursPriceUsd": 45.00,
-    "dayOffPriceUsd": 55.00,
-    "recurringPriceUsd": 40.00
-  }
+Create a service.
+
+- **Auth:** required (barber)
+- **Body** (`CreateBarberServiceDto`):
+  | Field | Type | Required | Notes |
+  |---|---|---|---|
+  | `name` | string | yes | max 100, e.g. `"Skin Fade"` |
+  | `serviceType` | `ServiceType` | yes | enum |
+  | `durationMinutes` | `15 \| 30 \| 45 \| 60` | yes | |
+  | `regularPriceUsd` | number | yes | base price |
+  | `afterHoursPriceUsd` | number | no | enables after-hours bookings for this service |
+  | `dayOffPriceUsd` | number | no | enables day-off bookings |
+  | `recurringPriceUsd` | number | no | per-occurrence price; **null/omit ⇒ this service is NOT bookable as recurring** |
+- **Response 201:**
+  ```ts
+  { success: true, data: BarberServiceDto }
   ```
 
-  | Field | Required | Notes |
-  |---|---|---|
-  | `name` | yes | unique per barber among active services |
-  | `serviceType` | yes | `ServiceType` enum |
-  | `durationMinutes` | yes | 15 / 30 / 45 / 60 |
-  | `regularPriceUsd` | yes | ≥ 0 |
-  | `afterHoursPriceUsd` | no | required to sell after-hours slots |
-  | `dayOffPriceUsd` | no | required to sell day-off slots |
-  | `recurringPriceUsd` | no | null ⇒ service does not support recurring bookings |
-
-- **Response 201:** `{ "success": true, "data": BarberService }` — see 3.3 for shape.
-- **Errors:** `409` on duplicate name.
-
-## 3.2. `GET /barbers/:barberId/services` — list (incl. inactive)
-
-- **Response 200:** `{ "success": true, "data": BarberService[] }`
-
-## 3.3. `GET /barbers/:barberId/services/:serviceId`
-
-- **Response 200:** `{ "success": true, "data": BarberService }`
-
-`BarberService`:
+`BarberServiceDto`:
 ```ts
 {
   id: string;
   barberId: string;
   name: string;
   serviceType: ServiceType;
-  durationMinutes: 15 | 30 | 45 | 60;
+  durationMinutes: number;
   regularPriceUsd: number;
   afterHoursPriceUsd: number | null;
   dayOffPriceUsd: number | null;
@@ -274,101 +319,186 @@ All endpoints live under `/barbers/:barberId/services/*`. `barberId` is always t
 }
 ```
 
-## 3.4. `PATCH /barbers/:barberId/services/:serviceId` — partial update
+### 3.2 `GET /barbers/:barberId/services`
 
-- **Request:** any subset of the create DTO. Pass `null` on `afterHoursPriceUsd`, `dayOffPriceUsd`, `recurringPriceUsd` to clear them. `sortOrder` is also accepted.
-- **Response 200:** `{ "success": true, "data": BarberService }`
+List **all** services (active and inactive).
 
-## 3.5. `PATCH /barbers/:barberId/services/:serviceId/toggle`
+- **Auth:** required (barber)
+- **Response 200:** `{ success: true, data: BarberServiceDto[] }`
 
-- **Context:** Flips `isActive`. No body.
-- **Response 200:** `{ "success": true, "data": BarberService }`
+### 3.3 `GET /barbers/:barberId/services/:serviceId`
 
-## 3.6. `PATCH /barbers/:barberId/services/reorder`
+- **Auth:** required (barber)
+- **Response 200:** `{ success: true, data: BarberServiceDto }`
 
-- **Context:** Bulk-set `sortOrder` = index for each supplied id.
-- **Request:** `{ "serviceIds": ["uuid1", "uuid2", "uuid3"] }`
-- **Response 200:** `{ "success": true, "data": BarberService[] }`
+### 3.4 `PATCH /barbers/:barberId/services/:serviceId`
+
+Partial update.
+
+- **Auth:** required (barber)
+- **Body** (`UpdateBarberServiceDto`) — all fields optional:
+  - `name`, `serviceType`, `durationMinutes`, `regularPriceUsd`
+  - `afterHoursPriceUsd | null`, `dayOffPriceUsd | null`, `recurringPriceUsd | null` — **pass `null` to clear** (e.g. disable recurring on a service)
+  - `sortOrder`
+- **Response 200:** `{ success: true, data: BarberServiceDto }`
+
+### 3.5 `PATCH /barbers/:barberId/services/:serviceId/toggle`
+
+Flip `is_active`.
+
+- **Auth:** required (barber)
+- **Body:** none
+- **Response 200:** `{ success: true, data: BarberServiceDto }`
+
+### 3.6 `PATCH /barbers/:barberId/services/reorder`
+
+Bulk reorder. The first id gets `sort_order = 0`, second gets `1`, etc.
+
+- **Auth:** required (barber)
+- **Body:** `{ "serviceIds": ["uuid-1", "uuid-2", "uuid-3"] }`
+- **Response 200:** `{ success: true, data: BarberServiceDto[] }` — full list, in the new order.
 
 ---
 
-# 4. Availability (Client View of the Barber)
+## 4. Schedule
 
-The barber usually doesn't call this themselves — exposed for the client-side flow.
+Each barber has 7 schedule rows (Sunday=0 … Saturday=6). The barber edits one day at a time.
 
-## 4.1. `GET /barbers/:barberId/availability`
+### 4.1 `GET /schedule`
 
-- **Auth:** JWT. Role: **client**.
-- **Query:**
+Returns all 7 days for the authenticated barber.
 
+- **Auth:** required (barber)
+- **Response 200:** `{ success: true, data: ScheduleDayDto[] }` (7 items)
+
+`ScheduleDayDto`:
+```ts
+{
+  id: string;
+  barberId: string;
+  dayOfWeek: number;                    // 0..6
+  isWorking: boolean;
+  regularStartTime: string | null;      // 'HH:mm'
+  regularEndTime: string | null;
+  slotDurationMinutes: number;          // 15 | 30 | 45 | 60
+  afterHoursEnabled: boolean;
+  afterHoursStart: string | null;
+  afterHoursEnd: string | null;
+  dayOffBookingEnabled: boolean;
+  dayOffStartTime: string | null;
+  dayOffEndTime: string | null;
+  advanceNoticeMinutes: number;         // ≥ 0
+  recurringEnabled: boolean;
+  recurringFrequency: 'weekly' | 'biweekly' | 'both' | null;
+  recurringExtraChargeUsd: number | null;  // flat surcharge added on top of service.recurringPriceUsd
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+### 4.2 `PATCH /schedule/:dayOfWeek`
+
+Partial update of one day.
+
+- **Auth:** required (barber)
+- **Path:** `dayOfWeek` integer `0..6`.
+- **Body** (`UpdateScheduleDayDto`) — all fields optional:
+  - `isWorking: boolean`
+  - `regularStartTime: 'HH:mm'`, `regularEndTime: 'HH:mm'`
+  - `slotDurationMinutes: 15 | 30 | 45 | 60`
+  - `afterHoursEnabled: boolean`, `afterHoursStart: 'HH:mm'`, `afterHoursEnd: 'HH:mm'`
+  - `dayOffBookingEnabled: boolean`, `dayOffStartTime: 'HH:mm'`, `dayOffEndTime: 'HH:mm'`
+  - `advanceNoticeMinutes: number ≥ 0`
+  - `recurringEnabled: boolean`
+  - `recurringFrequency: 'weekly' | 'biweekly' | 'both'` — **required when** `recurringEnabled = true`
+  - `recurringExtraChargeUsd: number ≥ 0` — flat surcharge per occurrence on this day
+- **Response 200:** `{ success: true, data: ScheduleDayDto }`
+
+---
+
+## 5. Settings
+
+Three independent toggles live under `/barber/settings/`. Each returns a structured response — read it back into your local store rather than assuming the `body.enabled` you sent.
+
+### 5.1 `PATCH /barber/settings/auto-confirm`
+
+Toggle global auto-confirm for **all** incoming bookings.
+
+- **Auth:** required (barber)
+- **Body:** `{ "enabled": true }`
+- **Response 200:** `{ "allowAutoConfirm": boolean, "autoConfirmToday": boolean }`
+
+### 5.2 `PATCH /barber/settings/auto-confirm-today`
+
+Toggle auto-confirm only for **same-day** bookings (lower-stakes opt-in).
+
+- **Auth:** required (barber)
+- **Body:** `{ "enabled": true }`
+- **Response 200:** `{ "allowAutoConfirm": boolean, "autoConfirmToday": boolean }`
+
+### 5.3 `PATCH /barber/settings/recurring`
+
+Master switch for recurring availability across the barber's profile (independent of per-day `recurringEnabled`).
+
+- **Auth:** required (barber)
+- **Body:** `{ "enabled": true }`
+- **Response 200:** `{ "recurringEnabled": boolean }`
+
+### 5.4 `PATCH /barber/settings/no-show-charge`
+
+Toggle the no-show charge feature and/or set its USD amount. **Requires a Stripe Connect account whose `charges_enabled` is `true`** — see [Section 13](#13-stripe-connect--no-show-charges).
+
+- **Auth:** required (barber)
+- **Body** (`UpdateNoShowChargeDto`):
+  | Field | Type | Required | Notes |
+  |---|---|---|---|
+  | `enabled` | boolean | yes | |
+  | `amountUsd` | number ≥ 0 | required when `enabled = true` | flat USD amount charged to the client's saved card on no-show |
+- **Response 200:** `{ "enabled": boolean, "amountUsd": number | null }`
+- Errors: `409 CONNECT_REQUIRED` when enabling without a Connect account in `charges_enabled = true` state.
+
+---
+
+## 6. Bookings (one-off)
+
+### 6.1 `GET /barber/bookings`
+
+Cursor-paginated list of the barber's bookings.
+
+- **Auth:** required (barber)
+- **Query** (`ListBarberBookingsQueryDto`):
   | Param | Type | Required | Notes |
   |---|---|---|---|
-  | `serviceId` | UUID | yes | |
-  | `startDate` | `YYYY-MM-DD` | yes | clamped to today if in the past |
-  | `endDate` | `YYYY-MM-DD` | yes | ≥ `startDate`, ≤ `startDate + 14 days` |
-
-- **Response 200:**
+  | `timeframe` | `'upcoming' \| 'past'` | yes | |
+  | `bookingType` | `BookingType` | no | filter on regular / after_hours / day_off |
+  | `status` | `BookingStatus` | no | |
+  | `type` | `'one_off' \| 'recurring'` | no | `recurring` = bookings spawned from a subscription |
+  | `cursor` | uuid | no | `id` of the last item on the previous page |
+  | `limit` | int 1..50 | no | default 20 |
+- **Response 200** (`BarberBookingsListResponseDto`):
   ```ts
   {
-    barberId: string;
-    service: { id, name, durationMinutes, regularPrice, afterHoursPrice, dayOffPrice };
-    days: Array<{
-      date: string;              // YYYY-MM-DD
-      dayOfWeek: 0..6;
-      isWorkingDay: boolean;
-      slotDurationMinutes: number | null;
-      slots: {
-        regular:    Slot[];
-        afterHours: Slot[];
-        dayOff:     Slot[];
-      };
-    }>;
-  }
-  // Slot: { time, endTime, available, price }
-  ```
-
----
-
-# 5. Barber Bookings
-
-All under `/barber/bookings`. Role: barber.
-
-## 5.1. `GET /barber/bookings` — list with filters
-
-- **Query:**
-
-  | Param | Type | Notes |
-  |---|---|---|
-  | `timeframe` | `upcoming\|past` | **required** |
-  | `bookingType` | `BookingType` | optional |
-  | `status` | `BookingStatus` | optional |
-  | `type` | `one_off\|recurring` | optional |
-  | `cursor` | UUID | optional |
-  | `limit` | 1..50 | default 20 |
-
-- **Response 200:**
-  ```ts
-  {
-    bookings: Array<{
+    bookings: [{
       id: string;
-      client: { id, name, profilePhotoUrl };
-      service: { name, durationMinutes };
-      scheduledAt: string;       // ISO UTC
+      client: { id: string; name: string; profilePhotoUrl: string | null };
+      service: { name: string; durationMinutes: number };
+      scheduledAt: string;             // ISO timestamp
       bookingType: BookingType;
       totalPrice: number;
       status: BookingStatus;
       isRecurring: boolean;
       recurringBookingId: string | null;
       createdAt: string;
-    }>;
+    }];
     nextCursor: string | null;
     hasMore: boolean;
   }
   ```
 
-## 5.2. `GET /barber/bookings/:id` — detail
+### 6.2 `GET /barber/bookings/:id`
 
-- **Response 200:**
+- **Auth:** required (barber)
+- **Response 200** (`BarberBookingDetailResponseDto`):
   ```ts
   {
     booking: {
@@ -378,10 +508,10 @@ All under `/barber/bookings`. Role: barber.
       scheduledAt: string;
       bookingType: BookingType;
       status: BookingStatus;
-      pricing: { basePrice, additionalCost, totalPrice };
+      pricing: { basePrice: number; additionalCost: number; totalPrice: number };
       confirmedAt: string | null;
       cancelledAt: string | null;
-      cancelledBy: 'client'|'barber'|null;
+      cancelledBy: 'client' | 'barber' | null;
       noShowCharged: boolean;
       noShowChargeAmountUsd: number | null;
       reviewLeftByClient: boolean;
@@ -392,204 +522,552 @@ All under `/barber/bookings`. Role: barber.
   }
   ```
 
-## 5.3. `PATCH /barber/bookings/:id/confirm`
+### 6.3 `PATCH /barber/bookings/:id/confirm`
 
-- **Context:** Only allowed when `status = pending`. No body.
-- **Response 200:** `{ "booking": { id, status: "confirmed", confirmedAt } }`
+Manually confirm a `pending` booking.
 
-## 5.4. `PATCH /barber/bookings/:id/cancel`
+- **Auth:** required (barber)
+- **Body:** none
+- **Response 200:** `{ "booking": { "id", "status": "confirmed", "confirmedAt": "<iso>" } }`
+- Errors: `409` if status is not `pending`.
 
-- **Context:** Allowed on `pending` or `confirmed`. No body.
-- **Response 200:** `{ "booking": { id, status: "cancelled", cancelledAt, cancelledBy: "barber" } }`
+### 6.4 `PATCH /barber/bookings/:id/cancel`
 
-## 5.5. `PATCH /barber/bookings/:id/complete`
+Cancel any booking in `pending` or `confirmed`.
 
-- **Context:** Allowed only on `confirmed`. Confirm first if needed. No body.
-- **Response 200:** `{ "booking": { id, status: "completed" } }`
+- **Auth:** required (barber)
+- **Body:** none
+- **Response 200:** `{ "booking": { "id", "status": "cancelled", "cancelledAt": "<iso>", "cancelledBy": "barber" } }`
 
-## 5.6. `PATCH /barber/bookings/:id/no-show`
+### 6.5 `PATCH /barber/bookings/:id/complete`
 
-- **Context:** Allowed on `confirmed` or `completed` **after** the appointment window has ended (`scheduledAt + duration_minutes < now()`). No body.
-- **Response 200:** `{ "booking": { id, status: "no_show" } }`
+Mark a `confirmed` booking as completed (after the appointment).
 
----
+- **Auth:** required (barber)
+- **Body:** none
+- **Response 200:** `{ "booking": { "id", "status": "completed" } }`
 
-# 6. Barber Settings
+### 6.6 `PATCH /barber/bookings/:id/no-show`
 
-## 6.1. `PATCH /barber/settings/auto-confirm`
+Mark a booking as no-show **after the appointment window ends**.
 
-- **Context:** Turns on auto-confirm for **all** incoming bookings.
-- **Request:** `{ "enabled": true }`
-- **Response 200:** `{ "allowAutoConfirm": true, "autoConfirmToday": false }`
-
-## 6.2. `PATCH /barber/settings/auto-confirm-today`
-
-- **Context:** Only same-day bookings auto-confirm (evaluated in the barber's timezone). Ignored when `allowAutoConfirm = true`.
-- **Request:** `{ "enabled": true }`
-- **Response 200:** same shape as 6.1.
-
-## 6.3. `PATCH /barber/settings/recurring`
-
-- **Context:** Barber-level manual override. Auto-synced whenever any schedule day toggles recurring; this endpoint lets the barber force it off without editing every day.
-- **Request:** `{ "enabled": true }`
-- **Response 200:** `{ "recurringEnabled": true }`
+- **Auth:** required (barber)
+- **Body:** none
+- **Response 200:** `{ "booking": { "id", "status": "no_show" } }`
 
 ---
 
-# 7. Barber Recurring Bookings
+## 7. Recurring Bookings
 
-All endpoints `role: barber`. See [docs/recurring-bookings.md] or the Postman collection for a full flow walkthrough.
+A *recurring booking* is a subscription (weekly or biweekly) at a fixed day-of-week + slot time. The client requests it; the barber accepts/declines. Once accepted, the system synchronously generates a 60-day rolling window of confirmed appointments.
 
-## 7.1. `GET /barber/recurring-bookings` — list
+### 7.1 `GET /barber/recurring-bookings`
 
-- **Query:**
+Cursor-paginated list. Pending offers appear here with `status = 'pending_barber_approval'`.
 
-  | Param | Type | Notes |
-  |---|---|---|
-  | `status` | `RecurringStatus` | optional — use `pending_barber_approval` to find incoming offers |
-  | `cursor` | UUID | optional |
-  | `limit` | 1..50 | default 20 |
-
-- **Response 200:**
+- **Auth:** required (barber)
+- **Query** (`ListRecurringBookingsQueryDto`):
+  | Param | Type | Required | Notes |
+  |---|---|---|---|
+  | `status` | `RecurringStatus` | no | filter |
+  | `cursor` | uuid | no | |
+  | `limit` | 1..50 | no | default 20 |
+- **Response 200** (`RecurringBookingsListResponseDto`):
   ```ts
   {
-    recurringBookings: Array<{
+    recurringBookings: [{
       id: string;
       status: RecurringStatus;
       isRenewal: boolean;
-      dayOfWeek: 0..6;
-      slotTime: "HH:mm";
-      frequency: 'weekly'|'biweekly';
+      dayOfWeek: number;             // 0..6
+      slotTime: string;              // 'HH:mm'
+      frequency: 'weekly' | 'biweekly';
       priceUsd: number;
       service: { id, name, durationMinutes };
       barber: { id, name };
       client: { id, name };
-      nextOccurrenceAt: string | null;   // ISO UTC; next upcoming confirmed/pending booking
+      nextOccurrenceAt: string | null;  // ISO
       createdAt: string;
-    }>;
+    }];
     nextCursor: string | null;
     hasMore: boolean;
   }
   ```
 
-## 7.2. `GET /barber/recurring-bookings/:id` — detail
+### 7.2 `GET /barber/recurring-bookings/:id`
 
-- **Response 200:** `{ recurringBooking: RecurringBookingDetail }`
-
-```ts
-RecurringBookingDetail = RecurringBooking & {
-  pastOccurrences:     { bookingId, scheduledAt, status }[];  // all history
-  upcomingOccurrences: { bookingId, scheduledAt, status }[];  // capped at 8
-}
-
-RecurringBooking = {
-  id: string;
-  status: RecurringStatus;
-  isRenewal: boolean;
-  originalRecurringBookingId: string | null;
-  dayOfWeek: 0..6;
-  slotTime: "HH:mm";
-  frequency: 'weekly'|'biweekly';
-  priceUsd: number;
-  pauseStartDate: string | null;    // YYYY-MM-DD
-  pauseEndDate:   string | null;    // YYYY-MM-DD (null ⇒ indefinite)
-  windowStartDate: string | null;   // YYYY-MM-DD, set on accept
-  service: { id, name, durationMinutes };
-  barber:  { id, name };
-  client:  { id, name };
-  createdAt: string;
-  barberAcceptedAt: string | null;
-  barberDeclinedAt: string | null;
-  declinedReason:   string | null;
-  cancelledAt:      string | null;
-  cancelledBy:      'client'|'barber'|null;
-}
-```
-
-## 7.3. `PATCH /barber/recurring-bookings/:id/accept`
-
-- **Context:** Moves `pending_barber_approval → active`, stamps `barberAcceptedAt`, sets `windowStartDate = today`, and **synchronously generates 60 days of `confirmed` booking rows**. This call can take longer than others — expect a few seconds.
-- **Request:** no body.
-- **Response 200:** `{ recurringBooking: RecurringBooking }`.
-- **Errors:** `400` if status is not pending.
-
-## 7.4. `PATCH /barber/recurring-bookings/:id/decline`
-
-- **Request:** `{ "reason": "I'm fully booked on Tuesdays" }` *(reason optional, max 500)*
-- **Response 200:** `{ recurringBooking: RecurringBooking }` (status = `cancelled`, `cancelledBy = "barber"`).
-
-## 7.5. `PATCH /barber/recurring-bookings/:id/pause`
-
-- **Request:**
-  ```json
-  { "pauseStartDate": "2026-05-01", "pauseEndDate": "2026-05-31" }
-  ```
-  `pauseEndDate` is optional — omit for indefinite pause. `pauseStartDate` must not be in the past (barber timezone).
-- **Side effect:** Cancels any already-generated booking rows inside the pause range; past rows are untouched.
-- **Response 200:** `{ recurringBooking: RecurringBooking }` (status = `paused`).
-
-## 7.6. `PATCH /barber/recurring-bookings/:id/resume`
-
-- **Context:** Clears the pause window and re-fills any gaps in the remaining 60-day window.
-- **Request:** no body.
-- **Response 200:** `{ recurringBooking: RecurringBooking }` (status = `active`).
-
-## 7.7. `PATCH /barber/recurring-bookings/:id/cancel`
-
-- **Context:** Cancels the subscription and all future `pending`/`confirmed` bookings linked to it. Past/completed rows are preserved. Not reversible.
-- **Request:** no body.
-- **Response 200:** `{ recurringBooking: RecurringBooking }` (status = `cancelled`, `cancelledBy = "barber"`).
-
----
-
-# 8. Reviews
-
-## 8.1. `GET /barber/reviews` — my reviews
-
-- **Auth:** JWT. Role: barber.
-- **Query:** `cursor` (UUID, optional), `limit` (1..50, default 20).
-- **Response 200:**
+- **Auth:** required (barber)
+- **Response 200** (`RecurringBookingDetailResponseDto`):
   ```ts
   {
-    barber: { id, name, averageRating, totalReviews };
-    reviews: Array<{
+    recurringBooking: {
+      ...RecurringBookingDto,        // see /barber/recurring-bookings list shape (extended)
+      services: [{ id, name, durationMinutes, bookingType, startOffsetMinutes, priceUsd }],
+      totalDurationMinutes: number,
+      pastOccurrences: [{ bookingId, scheduledAt, status }],
+      upcomingOccurrences: [{ bookingId, scheduledAt, status }],   // capped at 8
+      windowStartDate: string | null,
+      pauseStartDate: string | null,
+      pauseEndDate: string | null,
+      barberAcceptedAt: string | null,
+      barberDeclinedAt: string | null,
+      declinedReason: string | null,
+      cancelledAt: string | null,
+      cancelledBy: 'client' | 'barber' | null
+    }
+  }
+  ```
+
+### 7.3 `PATCH /barber/recurring-bookings/:id/accept`
+
+Accept a pending offer. Generates the 60-day window of `confirmed` bookings synchronously.
+
+- **Auth:** required (barber)
+- **Body:** none
+- **Response 200:** `{ recurringBooking: RecurringBookingDto }` (status now `active`).
+
+### 7.4 `PATCH /barber/recurring-bookings/:id/decline`
+
+Decline a pending offer.
+
+- **Auth:** required (barber)
+- **Body:** `{ "reason": "string (optional, max 500)" }`
+- **Response 200:** `{ recurringBooking: RecurringBookingDto }` (status `cancelled`, `barberDeclinedAt` set).
+
+### 7.5 `PATCH /barber/recurring-bookings/:id/pause`
+
+- **Auth:** required (barber)
+- **Body:**
+  | Field | Type | Required | Notes |
+  |---|---|---|---|
+  | `pauseStartDate` | `'YYYY-MM-DD'` | yes | |
+  | `pauseEndDate` | `'YYYY-MM-DD'` | no | omit for indefinite pause |
+- **Response 200:** `{ recurringBooking }` (status `paused`).
+
+### 7.6 `PATCH /barber/recurring-bookings/:id/resume`
+
+Resumes from `paused`. The system re-fills the 60-day window.
+
+- **Auth:** required (barber)
+- **Body:** none
+- **Response 200:** `{ recurringBooking }`.
+
+### 7.7 `PATCH /barber/recurring-bookings/:id/cancel`
+
+Cancels the subscription. Future generated bookings are cancelled; past/completed rows are preserved.
+
+- **Auth:** required (barber)
+- **Body:** none
+- **Response 200:** `{ recurringBooking }` (status `cancelled`, `cancelledBy: 'barber'`).
+
+---
+
+## 8. Reviews
+
+### 8.1 `GET /barber/reviews`
+
+The barber's own reviews, newest first. Supports filtering by star rating to back the "All / 5★ / 4★ / 3★ / 2★ / 1★" tab strip.
+
+- **Auth:** required (barber)
+- **Query** (`ListReviewsQueryDto`):
+  | Param | Type | Required | Notes |
+  |---|---|---|---|
+  | `cursor` | uuid | no | |
+  | `limit` | 1..50 | no | default 20 |
+  | `rating` | int 1..5 | no | when set, only reviews with this exact star count are returned. Omit for "All". |
+- **Response 200** (`ReviewsListResponseDto`):
+  ```ts
+  {
+    barber: {
       id: string;
-      client: { name, profilePhotoUrl };
-      rating: 1..5;
+      name: string;
+      averageRating: number | null;   // null when 0 reviews — UNFILTERED average across all ratings
+      totalReviews: number;           // UNFILTERED total across all ratings (drives the "X total" header)
+    };
+    reviews: [{
+      id: string;
+      client: { name: string; profilePhotoUrl: string | null };
+      rating: number;                 // 1..5
       comment: string | null;
-      relativeTime: string;   // e.g. "2 days ago"
+      relativeTime: string;           // e.g. "6 months ago"
       createdAt: string;
-    }>;
+    }];
     nextCursor: string | null;
     hasMore: boolean;
   }
   ```
 
+> The `barber.averageRating` and `barber.totalReviews` fields are computed from **all** reviews — they do not change when `rating` is set. Only the `reviews` array is filtered. Use `GET /barber/reviews/analytics` (8.2) to drive the per-star bars.
+
+### 8.2 `GET /barber/reviews/analytics`
+
+Aggregate breakdown for the reviews screen header (the bar chart with star-by-star counts in the screenshot).
+
+- **Auth:** required (barber)
+- **Query:** none
+- **Response 200** (`ReviewsAnalyticsResponseDto`):
+  ```ts
+  {
+    totalReviews: number;             // 7 → "7 total"
+    averageRating: number | null;     // 4.6 → big number on the left
+    ratingsBreakdown: [               // always 5 entries, ordered 5 → 1
+      { rating: 5, count: 5, percentage: 71 },
+      { rating: 4, count: 1, percentage: 14 },
+      { rating: 3, count: 1, percentage: 14 },
+      { rating: 2, count: 0, percentage: 0 },
+      { rating: 1, count: 0, percentage: 0 }
+    ];
+  }
+  ```
+  - `percentage` is a whole number (`Math.round((count / totalReviews) * 100)`). Use it directly as the bar fill width.
+  - When `totalReviews === 0`: `averageRating = null` and every breakdown entry has `count = 0, percentage = 0`.
+
 ---
 
-# 9. Putting It Together — Barber Onboarding Flow
+## 9. Conversations / Messaging
 
-The minimum sequence to get a new barber from "just signed up" to "accepting bookings":
+Chat threads. Both barbers and clients use `/conversations`. **Only barbers can start a new thread.**
 
-1. `POST /auth/barber/step1` → capture tokens.
-2. `POST /auth/barber/step2` → shop details.
-3. `POST /auth/barber/step3` → photo + bio (multipart).
-4. `POST /barbers/:barberId/services` → one or more services. Include `recurringPriceUsd` if the barber will offer recurring bookings for that service.
-5. `PATCH /schedule/:dayOfWeek` for each working day. Set `isWorking`, `regularStartTime`/`regularEndTime`, `slotDurationMinutes`, and any of `afterHoursEnabled`, `dayOffBookingEnabled`, `recurringEnabled` + `recurringFrequency` the barber wants.
-6. *(optional)* `PATCH /barber/settings/auto-confirm` or `auto-confirm-today` to control how new bookings flow in.
-7. The barber is now live. Daily ops live in §5 (manage bookings), §7 (recurring subscriptions), §8 (reviews).
+### 9.1 `GET /conversations`
+
+- **Auth:** required (barber or client)
+- **Query** (`ListConversationsQueryDto`):
+  | Param | Type | Required | Notes |
+  |---|---|---|---|
+  | `page` | int ≥ 1 | no | default 1 |
+  | `limit` | 1..100 | no | default 20 |
+  | `search` | string | no | partial match on the other party's name |
+- **Response 200** (`ListConversationsResponseDto`):
+  ```ts
+  {
+    conversations: [{
+      id: string;
+      otherParty: { id, name, profilePhotoUrl };
+      lastMessageBody: string | null;
+      lastMessageAt: string | null;       // ISO
+      lastMessageSenderRole: 'barber' | 'client' | null;
+      unreadCount: number;
+      hasBooking: boolean;                 // does the client have a non-cancelled booking with this barber?
+      createdAt: string;
+    }];
+    pagination: {
+      currentPage, totalPages, totalConversations, limit, hasNextPage
+    };
+  }
+  ```
+
+### 9.2 `GET /conversations/:id/messages`
+
+Cursor-paginated message history. **Marks counterparty messages as read.**
+
+- **Auth:** required
+- **Query** (`ListMessagesQueryDto`):
+  | Param | Type | Required | Notes |
+  |---|---|---|---|
+  | `before` | uuid | no | cursor — message id; returns rows strictly before this one |
+  | `limit` | 1..100 | no | default 30 |
+- **Response 200** (`ListMessagesResponseDto`) — messages are returned **ascending by created_at** (oldest first), so prepend older pages to the top of the thread:
+  ```ts
+  {
+    messages: [{
+      id, conversationId,
+      senderRole: 'barber' | 'client',
+      body: string,
+      readAt: string | null,
+      createdAt: string
+    }];
+    hasMore: boolean;
+    nextCursor: string | null;       // pass as `before` for the next page
+  }
+  ```
+
+### 9.3 `POST /conversations/:id/messages`
+
+- **Auth:** required
+- **Body:** `{ "body": "string (1..1000)" }`
+- **Response 201:** `{ "message": MessageDto }`
+
+### 9.4 `POST /conversations/start` *(barber-only)*
+
+Start a thread with a client. If a thread already exists, returns the existing one (idempotent).
+
+- **Auth:** required (barber)
+- **Body:** `{ "clientId": "<auth user uuid of the client>" }`
+- **Response 201:** `{ "conversation": ConversationListItemDto }`
+
+> **Realtime:** Subscribe to Supabase Realtime on the `messages` table filtered by `conversation_id` to receive live updates between API polls.
 
 ---
 
-# 10. HTTP Status Codes Quick Reference
+## 10. Push Notifications
 
-| Code | When |
-|---|---|
-| 200 | Successful `GET` / `PATCH` / `PUT` |
-| 201 | Successful `POST` (also `/auth/*` endpoints per NestJS defaults) |
-| 400 | Validation failure, bad state transition, business rule violation |
-| 401 | Missing / invalid JWT |
-| 403 | Role mismatch (role guard) or ownership mismatch |
-| 404 | Resource not found or not owned by caller |
-| 409 | Unique conflict (slot already taken, renewal already in progress, duplicate service name) |
-| 500 | Unhandled server error (bug or DB outage) |
+Expo / FCM push tokens are stored per `(user_id, platform)`.
+
+### 10.1 `POST /device-token`
+
+Register or refresh the caller's push token (upsert on `user_id, platform`).
+
+- **Auth:** required
+- **Body:**
+  | Field | Type | Required | Notes |
+  |---|---|---|---|
+  | `token` | string | yes | `ExponentPushToken[…]` or FCM token, max 512 chars |
+  | `platform` | `'ios' \| 'android'` | yes | |
+- **Response 200:** `{ "id": "<row id>", "token": "<token>", "platform": "ios" }`
+
+### 10.2 `DELETE /device-token`
+
+Call on logout. Only removes the caller's own token.
+
+- **Auth:** required
+- **Body:** `{ "token": "<token>" }`
+- **Response 200:** `{ "removed": true }`
+
+### 10.3 `GET /barber/notifications`
+
+Page-paginated, newest first.
+
+- **Auth:** required (barber)
+- **Query:** `page` (default 1), `limit` (default 20, max 100).
+- **Response 200** (`ListNotificationsResponseDto`):
+  ```ts
+  {
+    notifications: [{
+      id: string;
+      type: NotificationType;
+      title: string;
+      body: string;
+      data: Record<string, unknown>;        // freeform payload — used for deep linking
+      isRead: boolean;
+      bookingId: string | null;
+      recurringBookingId: string | null;
+      conversationId: string | null;
+      messageId: string | null;
+      createdAt: string;
+    }];
+    pagination: { currentPage, totalPages, totalNotifications, limit, hasNextPage };
+  }
+  ```
+
+### 10.4 `GET /barber/notifications/unread-count`
+
+- **Auth:** required (barber)
+- **Response 200:** `{ "unreadCount": 5 }`
+
+### 10.5 `PUT /barber/notifications/:notificationId/read`
+
+- **Auth:** required (barber)
+- **Body:** none
+- **Response 200:** `{ "id": "<id>", "isRead": true }`
+
+---
+
+## 11. Notification Settings
+
+Two independent toggles for what kinds of push notifications the barber receives.
+
+### 11.1 `GET /barber/notification-settings`
+
+- **Auth:** required (barber)
+- **Response 200:**
+  ```json
+  {
+    "normal_bookings": true,
+    "recurring_bookings": true
+  }
+  ```
+  - `normal_bookings` → controls `new_booking` and `cancelled_booking` push.
+  - `recurring_bookings` → controls `new_recurring_request`, `recurring_cancelled`, `recurring_paused` push.
+
+### 11.2 `PUT /barber/notification-settings`
+
+- **Auth:** required (barber)
+- **Body:** `{ "normal_bookings": boolean, "recurring_bookings": boolean }` (both required)
+- **Response 200:** the same shape as `GET`.
+
+---
+
+## 12. Analytics
+
+### 12.1 `GET /bookings/analytics`
+
+Earnings analytics for the authenticated barber over a rolling window. Counts only `completed` bookings; no-show charges are **excluded**.
+
+- **Auth:** required (barber)
+- **Query** (`AnalyticsQueryDto`):
+  | Param | Type | Required | Notes |
+  |---|---|---|---|
+  | `period` | `'week' \| 'month' \| 'year'` | yes | rolling window ending now |
+- **Response 200** (`AnalyticsResponseDto`):
+  ```ts
+  {
+    period: 'week' | 'month' | 'year';
+    period_days: number;                  // 7 / 30 / 365
+    window_start: string;                 // ISO timestamp (UTC)
+    window_end: string;                   // ISO timestamp (UTC)
+    total_earnings_usd: number;           // sum across all completed bookings
+    standard_bookings: {
+      regular:     { count: number; total_usd: number };
+      after_hours: { count: number; total_usd: number };
+      day_off:     { count: number; total_usd: number };
+    };
+    recurring: {
+      total_occurrences_completed: number;
+      total_usd: number;
+      per_arrangement: [{
+        arrangement_id: string;           // recurring_booking id
+        client_name: string;
+        service_name: string;
+        day_of_week: number;              // 0..6
+        time_slot: string;                // 'HH:mm:ss'
+        frequency: 'weekly' | 'biweekly';
+        occurrences_completed: number;
+        total_usd: number;
+      }];
+    };
+  }
+  ```
+
+---
+
+## 13. Stripe Connect & No-Show Charges
+
+To bill clients for no-shows, a barber must connect a **Stripe Express** account. The platform creates the account on demand, sends the barber to a Stripe-hosted onboarding URL, and tracks the resulting capabilities. Once `chargesEnabled = true`, the barber can turn on no-show charges (Section 5.4); the no-show flow on `PATCH /barber/bookings/:id/no-show` will charge the client's saved card via the Connect account using a destination charge.
+
+> The mobile app **never collects or stores barber bank/SSN data**. All KYC happens on Stripe's hosted page.
+
+### Onboarding flow (mobile)
+
+1. App calls `POST /barbers/me/connect/onboard` → receives `onboardingUrl`.
+2. App opens that URL in an in-app browser (`expo-web-browser` `openAuthSessionAsync` is recommended) or system browser.
+3. Barber completes Stripe's KYC. Stripe redirects to:
+   - `APP_URL_BARBER/connect/return` — onboarding submitted (does **not** mean charges_enabled is true; verification can be pending).
+   - `APP_URL_BARBER/connect/refresh` — link expired or barber bailed out. Re-call `/onboard` to mint a fresh link.
+4. After redirect, the app calls `GET /barbers/me/connect/status` to read live capabilities.
+5. When `chargesEnabled === true`, the no-show toggle (`PATCH /barber/settings/no-show-charge`) becomes usable.
+
+`requirementsCurrentlyDue` lists fields Stripe is still asking for (e.g. `individual.dob.day`). Show them in the UI; if non-empty, route the barber back through `/onboard` to complete them.
+
+### 13.1 `POST /barbers/me/connect/onboard`
+
+Begin or resume Express onboarding. Creates the Connect account on first call (idempotent — subsequent calls return a fresh link for the same account).
+
+- **Auth:** required (barber)
+- **Body:** none
+- **Response 201** (`ConnectOnboardResponseDto`):
+  ```json
+  { "onboardingUrl": "https://connect.stripe.com/setup/e/acct_1Oj..." }
+  ```
+  The URL is one-time and expires after first use.
+
+### 13.2 `GET /barbers/me/connect/status`
+
+Live capabilities snapshot from Stripe (no caching — call after each redirect).
+
+- **Auth:** required (barber)
+- **Response 200** (`ConnectStatusResponseDto`):
+  ```ts
+  {
+    connected: boolean;                   // false ⇒ no Connect account on file
+    chargesEnabled: boolean;
+    payoutsEnabled: boolean;
+    requirementsCurrentlyDue: string[];   // empty when fully verified
+  }
+  ```
+
+### 13.3 `DELETE /barbers/me/connect`
+
+Disconnect (delete) the Express account. Idempotent. **Forces `no_show_charge_enabled = false`** so the barber cannot leave the toggle on without a backing account.
+
+- **Auth:** required (barber)
+- **Body:** none
+- **Response 200:** `{ "disconnected": true }`
+
+### What happens on a no-show
+
+When the barber calls `PATCH /barber/bookings/:id/no-show` (Section 6.6):
+
+- The booking is marked `no_show`.
+- If the no-show charge feature is enabled and the client has a saved card on their subscription, the system creates a Stripe `PaymentIntent` against the client's card with the destination set to the barber's Connect account.
+- The booking response surfaces the outcome via `noShowCharged` and `noShowChargeAmountUsd`. Skipped reasons (no card / no Connect / disabled / Connect not in `charges_enabled`) are logged but do not fail the no-show transition itself.
+- Booking detail (`GET /barber/bookings/:id`) reflects the updated charge fields after the webhook (`payment_intent.succeeded`) settles.
+
+---
+
+## Common Error Codes
+
+| Status | Meaning | Typical cause |
+|---|---|---|
+| 400 | Validation error | missing or malformed field; class-validator rejected the body/query |
+| 401 | Unauthorized | missing / expired access token; refresh and retry |
+| 403 | Forbidden | wrong role (e.g. client hitting `/barber/...`) |
+| 404 | Not found | id does not exist or belongs to another user |
+| 409 | Conflict | double booking, duplicate username, illegal state transition (e.g. confirming an already-cancelled booking), `CONNECT_REQUIRED` when enabling no-show charge without a verified Connect account |
+| 500 | Server error | log and retry; report if persistent |
+
+Common application error codes (`code` field in the error envelope):
+- `SUBSCRIPTION_REQUIRED` — only used on the client side; included for completeness.
+- `CONNECT_REQUIRED` — `PATCH /barber/settings/no-show-charge` rejected because the Connect account is missing or not in `charges_enabled` state.
+
+The mobile app should treat `401` as a signal to call `POST /auth/refresh` once and retry, then fall back to logout if refresh also returns 401.
+
+---
+
+## Quick Endpoint Index (Barber)
+
+| Group | Method | Path |
+|---|---|---|
+| Auth | POST | `/auth/barber/step1` |
+| Auth | POST | `/auth/barber/step2` |
+| Auth | POST | `/auth/barber/step3` |
+| Auth | POST | `/auth/login` |
+| Auth | POST | `/auth/refresh` |
+| Auth | POST | `/auth/logout` |
+| Auth | GET | `/auth/me` |
+| Auth | POST | `/auth/forgot-password` |
+| Auth | POST | `/auth/reset-password` |
+| Auth | PATCH | `/auth/change-password` |
+| Profile | GET | `/barber/profile` |
+| Profile | PATCH | `/barber/profile` |
+| Services | POST | `/barbers/:barberId/services` |
+| Services | GET | `/barbers/:barberId/services` |
+| Services | GET | `/barbers/:barberId/services/:serviceId` |
+| Services | PATCH | `/barbers/:barberId/services/:serviceId` |
+| Services | PATCH | `/barbers/:barberId/services/:serviceId/toggle` |
+| Services | PATCH | `/barbers/:barberId/services/reorder` |
+| Schedule | GET | `/schedule` |
+| Schedule | PATCH | `/schedule/:dayOfWeek` |
+| Settings | PATCH | `/barber/settings/auto-confirm` |
+| Settings | PATCH | `/barber/settings/auto-confirm-today` |
+| Settings | PATCH | `/barber/settings/recurring` |
+| Settings | PATCH | `/barber/settings/no-show-charge` |
+| Bookings | GET | `/barber/bookings` |
+| Bookings | GET | `/barber/bookings/:id` |
+| Bookings | PATCH | `/barber/bookings/:id/confirm` |
+| Bookings | PATCH | `/barber/bookings/:id/cancel` |
+| Bookings | PATCH | `/barber/bookings/:id/complete` |
+| Bookings | PATCH | `/barber/bookings/:id/no-show` |
+| Recurring | GET | `/barber/recurring-bookings` |
+| Recurring | GET | `/barber/recurring-bookings/:id` |
+| Recurring | PATCH | `/barber/recurring-bookings/:id/accept` |
+| Recurring | PATCH | `/barber/recurring-bookings/:id/decline` |
+| Recurring | PATCH | `/barber/recurring-bookings/:id/pause` |
+| Recurring | PATCH | `/barber/recurring-bookings/:id/resume` |
+| Recurring | PATCH | `/barber/recurring-bookings/:id/cancel` |
+| Reviews | GET | `/barber/reviews` |
+| Reviews | GET | `/barber/reviews/analytics` |
+| Messages | GET | `/conversations` |
+| Messages | GET | `/conversations/:id/messages` |
+| Messages | POST | `/conversations/:id/messages` |
+| Messages | POST | `/conversations/start` |
+| Push | POST | `/device-token` |
+| Push | DELETE | `/device-token` |
+| Notifications | GET | `/barber/notifications` |
+| Notifications | GET | `/barber/notifications/unread-count` |
+| Notifications | PUT | `/barber/notifications/:notificationId/read` |
+| Notification settings | GET | `/barber/notification-settings` |
+| Notification settings | PUT | `/barber/notification-settings` |
+| Analytics | GET | `/bookings/analytics` |
+| Connect | POST | `/barbers/me/connect/onboard` |
+| Connect | GET | `/barbers/me/connect/status` |
+| Connect | DELETE | `/barbers/me/connect` |

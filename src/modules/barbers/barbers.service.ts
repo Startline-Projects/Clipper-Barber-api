@@ -1,3 +1,4 @@
+import 'multer';
 import {
   BadRequestException,
   Injectable,
@@ -9,6 +10,12 @@ import { BookingCompletionService } from '../bookings/booking-completion.service
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationTypeDto } from '../notifications/dto/notification.dto';
 import { BookingTypeDto } from '../bookings/dto/preview-booking.dto';
+import { NoShowService } from '../payments/no-show.service';
+import { ConnectService } from '../payments/connect.service';
+import { ConnectRequired } from '../payments/payments.exceptions';
+import { UpdateBarberProfileDto } from './dto/update-barber-profile.dto';
+import { BarberProfileResponseDto } from '../auth/dto/responses/barber-profile.response.dto';
+import messages from '../../common/messages.json';
 import {
   BookingStatusDto,
   BookingTimeframeDto,
@@ -29,6 +36,10 @@ import { CompleteBookingResponseDto } from './dto/complete-booking-response.dto'
 import { NoShowBookingResponseDto } from './dto/no-show-response.dto';
 import { AutoConfirmSettingsResponseDto } from './dto/auto-confirm-settings-response.dto';
 import { RecurringEnabledResponseDto } from './dto/update-recurring-enabled.dto';
+import {
+  NoShowChargeSettingsResponseDto,
+  UpdateNoShowChargeDto,
+} from './dto/update-no-show-charge.dto';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 50;
@@ -100,6 +111,8 @@ export class BarbersService {
     private readonly supabaseService: SupabaseService,
     private readonly completionService: BookingCompletionService,
     private readonly notificationsService: NotificationsService,
+    private readonly noShowService: NoShowService,
+    private readonly connectService: ConnectService
   ) {}
 
   private get db() {
@@ -379,21 +392,23 @@ export class BarbersService {
     return { booking: { id: completed.id, status: completed.status } };
   }
 
-  public async markNoShow(
-    barberId: string,
-    bookingId: string
-  ): Promise<NoShowBookingResponseDto> {
+  public async markNoShow(barberId: string, bookingId: string): Promise<NoShowBookingResponseDto> {
     const existing = await this.fetchBookingForBarber(
       barberId,
       bookingId,
       'id, status, scheduled_at, duration_minutes'
     );
     const status = existing.status as string;
-    if (status === 'no_show') throw new BadRequestException('Booking is already marked as no-show.');
-    if (status === 'pending') throw new BadRequestException('Cannot mark a pending booking as no-show.');
-    if (status === 'cancelled') throw new BadRequestException('Cannot mark a cancelled booking as no-show.');
+    if (status === 'no_show')
+      throw new BadRequestException('Booking is already marked as no-show.');
+    if (status === 'pending')
+      throw new BadRequestException('Cannot mark a pending booking as no-show.');
+    if (status === 'cancelled')
+      throw new BadRequestException('Cannot mark a cancelled booking as no-show.');
     if (status !== 'confirmed' && status !== 'completed') {
-      throw new BadRequestException('Only confirmed or completed bookings can be marked as no-show.');
+      throw new BadRequestException(
+        'Only confirmed or completed bookings can be marked as no-show.'
+      );
     }
 
     const scheduledAt = new Date(existing.scheduled_at as string);
@@ -409,11 +424,25 @@ export class BarbersService {
       .eq('id', bookingId)
       .eq('barber_id', barberId)
       .in('status', ['confirmed', 'completed'])
-      .select('id, status')
+      .select('id, status, client_id')
       .single();
 
     if (updateError || !updated) {
       throw new InternalServerErrorException('Failed to mark booking as no-show');
+    }
+
+    // Booking transition is final. The Stripe charge runs as a separate
+    // best-effort step — failures are surfaced in chargeResult, never roll
+    // back the no_show status.
+    let chargeResult = null;
+    try {
+      chargeResult = await this.noShowService.charge({
+        bookingId: updated.id as string,
+        barberAuthId: barberId,
+        clientAuthId: updated.client_id as string,
+      });
+    } catch (err) {
+      console.error('No-show charge step failed for booking', updated.id, err);
     }
 
     return {
@@ -421,6 +450,7 @@ export class BarbersService {
         id: updated.id as string,
         status: updated.status as string,
       },
+      chargeResult,
     };
   }
 
@@ -442,6 +472,48 @@ export class BarbersService {
     return this.updateAutoConfirmFlag(barberId, { auto_confirm_today: enabled });
   }
 
+  public async updateNoShowChargeSettings(
+    barberId: string,
+    dto: UpdateNoShowChargeDto
+  ): Promise<NoShowChargeSettingsResponseDto> {
+    if (dto.enabled) {
+      // Connect must already be onboarded with charges_enabled — otherwise
+      // PaymentIntents created at no-show time would fail anyway.
+      const { data: barber, error: readErr } = await this.db
+        .from('barbers')
+        .select('stripe_connect_account_id')
+        .eq('user_id', barberId)
+        .maybeSingle();
+      if (readErr) throw new InternalServerErrorException('Failed to fetch barber');
+      if (!barber) throw new NotFoundException('Barber profile not found');
+
+      const ok = await this.connectService.hasChargesEnabled(
+        barber.stripe_connect_account_id as string | null
+      );
+      if (!ok) throw new ConnectRequired();
+    }
+
+    const patch: Record<string, unknown> = { no_show_charge_enabled: dto.enabled };
+    if (dto.amountUsd !== undefined) patch.no_show_charge_amount_usd = dto.amountUsd;
+
+    const { data, error } = await this.db
+      .from('barbers')
+      .update(patch)
+      .eq('user_id', barberId)
+      .select('no_show_charge_enabled, no_show_charge_amount_usd')
+      .maybeSingle();
+    if (error) throw new InternalServerErrorException('Failed to update no-show charge settings');
+    if (!data) throw new NotFoundException('Barber profile not found');
+
+    return {
+      enabled: data.no_show_charge_enabled as boolean,
+      amountUsd:
+        data.no_show_charge_amount_usd !== null && data.no_show_charge_amount_usd !== undefined
+          ? Number(data.no_show_charge_amount_usd)
+          : null,
+    };
+  }
+
   public async updateRecurringEnabled(
     barberId: string,
     enabled: boolean
@@ -457,6 +529,93 @@ export class BarbersService {
     if (!data) throw new NotFoundException('Barber profile not found');
 
     return { recurringEnabled: data.recurring_enabled as boolean };
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Barber profile — read / update
+  // ────────────────────────────────────────────────────────────
+
+  public async getProfile(barberId: string): Promise<BarberProfileResponseDto> {
+    const { data, error } = await this.db
+      .from('barbers')
+      .select('*')
+      .eq('user_id', barberId)
+      .maybeSingle();
+
+    if (error) throw new InternalServerErrorException(messages.barber.PROFILE_LOAD_FAILED);
+    if (!data) throw new NotFoundException('Barber profile not found');
+
+    return this.projectCanonicalId(data) as unknown as BarberProfileResponseDto;
+  }
+
+  public async updateProfile(
+    barberId: string,
+    dto: UpdateBarberProfileDto,
+    photo?: Express.Multer.File
+  ): Promise<BarberProfileResponseDto> {
+    const patch: Record<string, unknown> = {};
+
+    if (dto.fullName !== undefined) patch.full_name = dto.fullName;
+    if (dto.shopName !== undefined) patch.shop_name = dto.shopName;
+    if (dto.phone !== undefined) patch.phone = dto.phone;
+    if (dto.streetAddress !== undefined) patch.street_address = dto.streetAddress;
+    if (dto.city !== undefined) patch.city = dto.city;
+    if (dto.state !== undefined) patch.state = dto.state;
+    if (dto.zipCode !== undefined) patch.zip_code = dto.zipCode;
+    if (dto.latitude !== undefined) patch.latitude = dto.latitude;
+    if (dto.longitude !== undefined) patch.longitude = dto.longitude;
+    if (dto.bio !== undefined) patch.bio = dto.bio;
+    if (dto.instagramHandle !== undefined) patch.instagram_handle = dto.instagramHandle;
+
+    if (photo) {
+      patch.profile_photo_url = await this.uploadProfilePhoto(barberId, photo);
+    }
+
+    if (Object.keys(patch).length === 0) {
+      return this.getProfile(barberId);
+    }
+
+    const { data, error } = await this.db
+      .from('barbers')
+      .update(patch)
+      .eq('user_id', barberId)
+      .select('*')
+      .maybeSingle();
+
+    if (error) throw new InternalServerErrorException(messages.barber.PROFILE_UPDATE_FAILED);
+    if (!data) throw new NotFoundException('Barber profile not found');
+
+    if (dto.fullName !== undefined) {
+      await this.supabaseService.getClient().auth.admin.updateUserById(barberId, {
+        user_metadata: { full_name: dto.fullName },
+      });
+    }
+
+    return this.projectCanonicalId(data) as unknown as BarberProfileResponseDto;
+  }
+
+  private async uploadProfilePhoto(
+    barberId: string,
+    photo: Express.Multer.File
+  ): Promise<string> {
+    const ext = photo.mimetype.split('/')[1] ?? 'jpg';
+    const path = `${barberId}/profile.${ext}`;
+
+    const { error } = await this.db.storage
+      .from('profile-photos')
+      .upload(path, photo.buffer, { contentType: photo.mimetype, upsert: true });
+
+    if (error) throw new InternalServerErrorException(messages.barber.PHOTO_UPLOAD_FAILED);
+
+    const { data } = this.db.storage.from('profile-photos').getPublicUrl(path);
+    return data.publicUrl;
+  }
+
+  // Profile rows still carry both the internal `id` and `user_id`. Expose
+  // only the auth id under `id` so every API speaks the same identifier.
+  private projectCanonicalId(row: Record<string, unknown>): Record<string, unknown> {
+    const { id: _internalId, user_id, ...rest } = row;
+    return { id: user_id, ...rest };
   }
 
   // ────────────────────────────────────────────────────────────

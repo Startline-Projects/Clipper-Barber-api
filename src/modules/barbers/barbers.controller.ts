@@ -1,3 +1,4 @@
+import 'multer';
 import {
   Body,
   Controller,
@@ -6,9 +7,19 @@ import {
   ParseUUIDPipe,
   Patch,
   Query,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { FileInterceptor } from '@nestjs/platform-express';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { BarbersService } from './barbers.service';
 import { AvailabilityService } from '../bookings/availability.service';
 import { GetAvailabilityQueryDto } from '../bookings/dto/get-availability-query.dto';
@@ -18,6 +29,7 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { SupabaseUserPayload } from '../supabase/supabase.service';
+import { SubscriptionRequiredGuard } from '../payments/guards/subscription-required.guard';
 import { ListBarberBookingsQueryDto } from './dto/list-barber-bookings-query.dto';
 import { BarberBookingsListResponseDto } from './dto/barber-booking-list-item.dto';
 import { BarberBookingDetailResponseDto } from './dto/barber-booking-detail.dto';
@@ -31,6 +43,12 @@ import {
   RecurringEnabledResponseDto,
   UpdateRecurringEnabledDto,
 } from './dto/update-recurring-enabled.dto';
+import {
+  NoShowChargeSettingsResponseDto,
+  UpdateNoShowChargeDto,
+} from './dto/update-no-show-charge.dto';
+import { UpdateBarberProfileDto } from './dto/update-barber-profile.dto';
+import { BarberProfileResponseDto } from '../auth/dto/responses/barber-profile.response.dto';
 
 @ApiTags('Barbers')
 @Controller('barbers')
@@ -39,7 +57,7 @@ export class BarbersController {
 
   @Get(':barberId/availability')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard, RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, SubscriptionRequiredGuard)
   @Roles('client')
   @ApiOperation({ summary: 'Get available booking slots for a barber across all booking types' })
   @ApiResponse({ status: 200, description: 'Availability returned successfully' })
@@ -60,7 +78,9 @@ export class BarberBookingsController {
   constructor(private readonly barbersService: BarbersService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List barber bookings (upcoming/past) with filters + cursor pagination' })
+  @ApiOperation({
+    summary: 'List barber bookings (upcoming/past) with filters + cursor pagination',
+  })
   @ApiResponse({ status: 200, type: BarberBookingsListResponseDto })
   public async listBookings(
     @CurrentUser() user: SupabaseUserPayload,
@@ -120,6 +140,66 @@ export class BarberBookingsController {
   }
 }
 
+@ApiTags('Barber Profile')
+@ApiBearerAuth()
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles('barber')
+@Controller('barber/profile')
+export class BarberProfileController {
+  constructor(private readonly barbersService: BarbersService) {}
+
+  @Get()
+  @ApiOperation({
+    summary: 'Get the authenticated barber’s full profile',
+  })
+  @ApiResponse({ status: 200, type: BarberProfileResponseDto })
+  public async getProfile(
+    @CurrentUser() user: SupabaseUserPayload
+  ): Promise<BarberProfileResponseDto> {
+    return this.barbersService.getProfile(user.sub);
+  }
+
+  @Patch()
+  @UseInterceptors(FileInterceptor('photo'))
+  @ApiConsumes('multipart/form-data', 'application/json')
+  @ApiOperation({
+    summary: 'Update the authenticated barber’s profile',
+    description:
+      'Any subset of fields may be supplied. Send as multipart/form-data when including a `photo` file; otherwise application/json works just as well.',
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        photo: {
+          type: 'string',
+          format: 'binary',
+          description: 'Optional profile photo (max 5 MB)',
+        },
+        fullName: { type: 'string', maxLength: 100 },
+        shopName: { type: 'string', maxLength: 100 },
+        phone: { type: 'string' },
+        streetAddress: { type: 'string', maxLength: 200 },
+        city: { type: 'string', maxLength: 100 },
+        state: { type: 'string', maxLength: 50 },
+        zipCode: { type: 'string' },
+        latitude: { type: 'number' },
+        longitude: { type: 'number' },
+        bio: { type: 'string', maxLength: 500 },
+        instagramHandle: { type: 'string', maxLength: 50 },
+      },
+    },
+  })
+  @ApiResponse({ status: 200, type: BarberProfileResponseDto })
+  public async updateProfile(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Body() dto: UpdateBarberProfileDto,
+    @UploadedFile() photo?: Express.Multer.File
+  ): Promise<BarberProfileResponseDto> {
+    return this.barbersService.updateProfile(user.sub, dto, photo);
+  }
+}
+
 @ApiTags('Barber Settings')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -162,5 +242,19 @@ export class BarberSettingsController {
     @Body() dto: UpdateRecurringEnabledDto
   ): Promise<RecurringEnabledResponseDto> {
     return this.barbersService.updateRecurringEnabled(user.sub, dto.enabled);
+  }
+
+  @Patch('no-show-charge')
+  @ApiOperation({
+    summary:
+      'Toggle the no-show charge feature and/or update its amount. Returns 409 CONNECT_REQUIRED if attempting to enable without a Connect account whose charges_enabled is true.',
+  })
+  @ApiBody({ type: UpdateNoShowChargeDto })
+  @ApiResponse({ status: 200, type: NoShowChargeSettingsResponseDto })
+  public async updateNoShowCharge(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Body() dto: UpdateNoShowChargeDto
+  ): Promise<NoShowChargeSettingsResponseDto> {
+    return this.barbersService.updateNoShowChargeSettings(user.sub, dto);
   }
 }

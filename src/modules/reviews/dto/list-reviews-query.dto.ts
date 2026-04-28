@@ -15,4 +15,17 @@ export class ListReviewsQueryDto {
   @Min(1)
   @Max(50)
   limit?: number;
+
+  @ApiPropertyOptional({
+    minimum: 1,
+    maximum: 5,
+    description:
+      'Filter to reviews with this exact star rating (1..5). Omit for all ratings.',
+  })
+  @IsOptional()
+  @Transform(({ value }) => (value === undefined ? undefined : Number(value)))
+  @IsInt()
+  @Min(1)
+  @Max(5)
+  rating?: number;
 }

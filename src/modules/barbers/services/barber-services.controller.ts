@@ -58,7 +58,7 @@ export class BarberServicesController {
     type: ClientRecurringServicesResponseDto,
   })
   public async listRecurringServicesForClient(
-    @Param('barberId', ParseUUIDPipe) barberId: string,
+    @Param('barberId', ParseUUIDPipe) barberId: string
   ): Promise<ClientRecurringServicesResponseDto> {
     return this.barberServicesService.findRecurringServicesForClient(barberId);
   }

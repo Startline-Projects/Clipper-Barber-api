@@ -31,6 +31,47 @@
 $ npm install
 ```
 
+## Stripe setup
+
+The payments module reads its config from environment variables on boot. The
+process **fails fast** at startup if any required key is missing — there is
+no silent degradation at request time. Copy `.env.example` to `.env` and fill
+each value:
+
+| Env var                    | Where to get it                                                                                                                  |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `STRIPE_SECRET_KEY`        | Stripe Dashboard → Developers → API keys (use `sk_test_…` outside prod).                                                         |
+| `STRIPE_WEBHOOK_SECRET`    | Webhook endpoint signing secret. With Stripe CLI: `stripe listen --forward-to localhost:3001/webhooks/stripe` prints it as `whsec_…`. In prod, copy from the dashboard's webhook detail page. |
+| `STRIPE_PRICE_MONTHLY`     | One product (e.g. "Barbershop Client Subscription") with two recurring prices. Monthly $0.99 → copy its `price_…` ID here.       |
+| `STRIPE_PRICE_YEARLY`      | Same product's yearly $9.99 price → copy its `price_…` ID here.                                                                  |
+| `STRIPE_CONNECT_CLIENT_ID` | Stripe Connect settings → `ca_…` Connect client ID. Required for boot validation; not used at runtime (we use Express accounts). |
+| `APP_URL_CLIENT`           | Public URL of the client app — used by future redirect flows.                                                                    |
+| `APP_URL_BARBER`           | Public URL of the barber app — used as the base for `/connect/return` and `/connect/refresh` redirects from Stripe onboarding.  |
+
+In the Stripe dashboard, also create **one webhook endpoint** pointing at
+`POST {API_URL}/webhooks/stripe`, subscribed to:
+
+```
+customer.subscription.created
+customer.subscription.updated
+customer.subscription.deleted
+invoice.payment_succeeded
+invoice.payment_failed
+payment_intent.succeeded
+payment_intent.payment_failed
+account.updated
+payment_method.detached
+```
+
+Locally, the easiest way to develop is to forward events with the Stripe CLI:
+
+```bash
+stripe login
+stripe listen --forward-to localhost:3001/webhooks/stripe
+# copy the printed whsec_… into STRIPE_WEBHOOK_SECRET
+npm run start:dev
+```
+
 ## Compile and run the project
 
 ```bash

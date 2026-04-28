@@ -13,9 +13,10 @@ import { RecurringBookingsService } from './recurring/recurring.service';
 import { RecurringBookingGeneratorService } from './recurring/recurring-booking-generator.service';
 import { RecurringBookingsCron } from './recurring/recurring.cron';
 import { MessagesModule } from '../messages/messages.module';
+import { PaymentsModule } from '../payments/payments.module';
 
 @Module({
-  imports: [MessagesModule],
+  imports: [MessagesModule, PaymentsModule],
   controllers: [
     BookingsController,
     ClientBookingsController,
