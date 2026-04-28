@@ -9,6 +9,9 @@ import { BookingCompletionService } from '../bookings/booking-completion.service
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationTypeDto } from '../notifications/dto/notification.dto';
 import { BookingTypeDto } from '../bookings/dto/preview-booking.dto';
+import { NoShowService } from '../payments/no-show.service';
+import { ConnectService } from '../payments/connect.service';
+import { ConnectRequired } from '../payments/payments.exceptions';
 import {
   BookingStatusDto,
   BookingTimeframeDto,
@@ -29,6 +32,10 @@ import { CompleteBookingResponseDto } from './dto/complete-booking-response.dto'
 import { NoShowBookingResponseDto } from './dto/no-show-response.dto';
 import { AutoConfirmSettingsResponseDto } from './dto/auto-confirm-settings-response.dto';
 import { RecurringEnabledResponseDto } from './dto/update-recurring-enabled.dto';
+import {
+  NoShowChargeSettingsResponseDto,
+  UpdateNoShowChargeDto,
+} from './dto/update-no-show-charge.dto';
 
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 50;
@@ -100,6 +107,8 @@ export class BarbersService {
     private readonly supabaseService: SupabaseService,
     private readonly completionService: BookingCompletionService,
     private readonly notificationsService: NotificationsService,
+    private readonly noShowService: NoShowService,
+    private readonly connectService: ConnectService
   ) {}
 
   private get db() {
@@ -379,21 +388,23 @@ export class BarbersService {
     return { booking: { id: completed.id, status: completed.status } };
   }
 
-  public async markNoShow(
-    barberId: string,
-    bookingId: string
-  ): Promise<NoShowBookingResponseDto> {
+  public async markNoShow(barberId: string, bookingId: string): Promise<NoShowBookingResponseDto> {
     const existing = await this.fetchBookingForBarber(
       barberId,
       bookingId,
       'id, status, scheduled_at, duration_minutes'
     );
     const status = existing.status as string;
-    if (status === 'no_show') throw new BadRequestException('Booking is already marked as no-show.');
-    if (status === 'pending') throw new BadRequestException('Cannot mark a pending booking as no-show.');
-    if (status === 'cancelled') throw new BadRequestException('Cannot mark a cancelled booking as no-show.');
+    if (status === 'no_show')
+      throw new BadRequestException('Booking is already marked as no-show.');
+    if (status === 'pending')
+      throw new BadRequestException('Cannot mark a pending booking as no-show.');
+    if (status === 'cancelled')
+      throw new BadRequestException('Cannot mark a cancelled booking as no-show.');
     if (status !== 'confirmed' && status !== 'completed') {
-      throw new BadRequestException('Only confirmed or completed bookings can be marked as no-show.');
+      throw new BadRequestException(
+        'Only confirmed or completed bookings can be marked as no-show.'
+      );
     }
 
     const scheduledAt = new Date(existing.scheduled_at as string);
@@ -409,11 +420,25 @@ export class BarbersService {
       .eq('id', bookingId)
       .eq('barber_id', barberId)
       .in('status', ['confirmed', 'completed'])
-      .select('id, status')
+      .select('id, status, client_id')
       .single();
 
     if (updateError || !updated) {
       throw new InternalServerErrorException('Failed to mark booking as no-show');
+    }
+
+    // Booking transition is final. The Stripe charge runs as a separate
+    // best-effort step — failures are surfaced in chargeResult, never roll
+    // back the no_show status.
+    let chargeResult = null;
+    try {
+      chargeResult = await this.noShowService.charge({
+        bookingId: updated.id as string,
+        barberAuthId: barberId,
+        clientAuthId: updated.client_id as string,
+      });
+    } catch (err) {
+      console.error('No-show charge step failed for booking', updated.id, err);
     }
 
     return {
@@ -421,6 +446,7 @@ export class BarbersService {
         id: updated.id as string,
         status: updated.status as string,
       },
+      chargeResult,
     };
   }
 
@@ -440,6 +466,48 @@ export class BarbersService {
     enabled: boolean
   ): Promise<AutoConfirmSettingsResponseDto> {
     return this.updateAutoConfirmFlag(barberId, { auto_confirm_today: enabled });
+  }
+
+  public async updateNoShowChargeSettings(
+    barberId: string,
+    dto: UpdateNoShowChargeDto
+  ): Promise<NoShowChargeSettingsResponseDto> {
+    if (dto.enabled) {
+      // Connect must already be onboarded with charges_enabled — otherwise
+      // PaymentIntents created at no-show time would fail anyway.
+      const { data: barber, error: readErr } = await this.db
+        .from('barbers')
+        .select('stripe_connect_account_id')
+        .eq('user_id', barberId)
+        .maybeSingle();
+      if (readErr) throw new InternalServerErrorException('Failed to fetch barber');
+      if (!barber) throw new NotFoundException('Barber profile not found');
+
+      const ok = await this.connectService.hasChargesEnabled(
+        barber.stripe_connect_account_id as string | null
+      );
+      if (!ok) throw new ConnectRequired();
+    }
+
+    const patch: Record<string, unknown> = { no_show_charge_enabled: dto.enabled };
+    if (dto.amountUsd !== undefined) patch.no_show_charge_amount_usd = dto.amountUsd;
+
+    const { data, error } = await this.db
+      .from('barbers')
+      .update(patch)
+      .eq('user_id', barberId)
+      .select('no_show_charge_enabled, no_show_charge_amount_usd')
+      .maybeSingle();
+    if (error) throw new InternalServerErrorException('Failed to update no-show charge settings');
+    if (!data) throw new NotFoundException('Barber profile not found');
+
+    return {
+      enabled: data.no_show_charge_enabled as boolean,
+      amountUsd:
+        data.no_show_charge_amount_usd !== null && data.no_show_charge_amount_usd !== undefined
+          ? Number(data.no_show_charge_amount_usd)
+          : null,
+    };
   }
 
   public async updateRecurringEnabled(

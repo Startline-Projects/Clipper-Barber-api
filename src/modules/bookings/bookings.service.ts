@@ -16,10 +16,7 @@ import {
   PreviewBookingResponseDto,
 } from './dto/preview-booking-response.dto';
 import { ConfirmBookingResponseDto, ConfirmedBookingDto } from './dto/confirm-booking-response.dto';
-import {
-  CancelBookingResponseDto,
-  CancelledBookingDto,
-} from './dto/cancel-booking-response.dto';
+import { CancelBookingResponseDto, CancelledBookingDto } from './dto/cancel-booking-response.dto';
 import { BookingStatusDto } from '../barbers/dto/list-barber-bookings-query.dto';
 import {
   ClientBookingDetailDto,
@@ -32,10 +29,7 @@ import {
   ClientUpcomingBookingDto,
   ClientUpcomingBookingsResponseDto,
 } from './dto/client-upcoming-booking.dto';
-import {
-  ClientPastBookingDto,
-  ClientPastBookingsResponseDto,
-} from './dto/client-past-booking.dto';
+import { ClientPastBookingDto, ClientPastBookingsResponseDto } from './dto/client-past-booking.dto';
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 10;
@@ -150,7 +144,7 @@ export class BookingsService {
   constructor(
     private readonly supabaseService: SupabaseService,
     private readonly notificationsService: NotificationsService,
-    private readonly conversationsService: ConversationsService,
+    private readonly conversationsService: ConversationsService
   ) {}
 
   private get db() {
@@ -163,7 +157,7 @@ export class BookingsService {
 
   public async listClientUpcomingBookings(
     clientId: string,
-    query: ClientBookingsPageQueryDto,
+    query: ClientBookingsPageQueryDto
   ): Promise<ClientUpcomingBookingsResponseDto> {
     const page = query.page ?? DEFAULT_PAGE;
     const limit = Math.min(query.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
@@ -182,7 +176,7 @@ export class BookingsService {
     if (idErr) throw new InternalServerErrorException('Failed to fetch bookings');
 
     const deduped = this.dedupRecurringUpcoming(
-      (idRows ?? []) as { id: string; scheduled_at: string; recurring_booking_id: string | null }[],
+      (idRows ?? []) as { id: string; scheduled_at: string; recurring_booking_id: string | null }[]
     );
 
     const totalBookings = deduped.length;
@@ -206,7 +200,7 @@ export class BookingsService {
 
   public async listClientPastBookings(
     clientId: string,
-    query: ClientBookingsPageQueryDto,
+    query: ClientBookingsPageQueryDto
   ): Promise<ClientPastBookingsResponseDto> {
     const page = query.page ?? DEFAULT_PAGE;
     const limit = Math.min(query.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
@@ -226,9 +220,7 @@ export class BookingsService {
 
     const { data, error } = await this.db
       .from('bookings')
-      .select(
-        'id, scheduled_at, price_usd, status, barber_id, barber_service_id, duration_minutes',
-      )
+      .select('id, scheduled_at, price_usd, status, barber_id, barber_service_id, duration_minutes')
       .eq('client_id', clientId)
       .lt('scheduled_at', nowIso)
       .order('scheduled_at', { ascending: false })
@@ -250,7 +242,7 @@ export class BookingsService {
     const [{ barberMap, serviceMap }, reviewedIds, timezoneMap] = await Promise.all([
       this.loadClientBookingRelated(
         rows.map((r) => r.barber_id),
-        rows.map((r) => r.barber_service_id).filter((id): id is string => !!id),
+        rows.map((r) => r.barber_service_id).filter((id): id is string => !!id)
       ),
       this.fetchReviewedBookingIds(rows.map((r) => r.id)),
       this.fetchBarberTimezones(rows.map((r) => r.barber_id)),
@@ -286,7 +278,7 @@ export class BookingsService {
   }
 
   private dedupRecurringUpcoming(
-    rows: { id: string; scheduled_at: string; recurring_booking_id: string | null }[],
+    rows: { id: string; scheduled_at: string; recurring_booking_id: string | null }[]
   ): { id: string; scheduled_at: string }[] {
     const seenRecurring = new Set<string>();
     const result: { id: string; scheduled_at: string }[] = [];
@@ -306,7 +298,7 @@ export class BookingsService {
     const { data, error } = await this.db
       .from('bookings')
       .select(
-        'id, scheduled_at, status, barber_id, barber_service_id, duration_minutes, recurring_booking_id',
+        'id, scheduled_at, status, barber_id, barber_service_id, duration_minutes, recurring_booking_id'
       )
       .in('id', ids);
 
@@ -330,7 +322,7 @@ export class BookingsService {
     const [{ barberMap, serviceMap }, timezoneMap] = await Promise.all([
       this.loadClientBookingRelated(
         rows.map((r) => r.barber_id),
-        rows.map((r) => r.barber_service_id).filter((id): id is string => !!id),
+        rows.map((r) => r.barber_service_id).filter((id): id is string => !!id)
       ),
       this.fetchBarberTimezones(rows.map((r) => r.barber_id)),
     ]);
@@ -435,9 +427,12 @@ export class BookingsService {
 
     const barber = barberMap.get(row.barber_id);
 
-    const reviewRow = reviewResult.data as
-      | { id: string; rating: number; comment: string | null; created_at: string }
-      | null;
+    const reviewRow = reviewResult.data as {
+      id: string;
+      rating: number;
+      comment: string | null;
+      created_at: string;
+    } | null;
     const review: ClientBookingReviewDto | null = reviewRow
       ? {
           id: reviewRow.id,
@@ -475,7 +470,8 @@ export class BookingsService {
       totalDurationMinutes,
       totalPrice,
       status: row.status as BookingStatusDto,
-      cancelledAt: isCancelled && row.cancelled_at ? new Date(row.cancelled_at).toISOString() : null,
+      cancelledAt:
+        isCancelled && row.cancelled_at ? new Date(row.cancelled_at).toISOString() : null,
       cancelledBy: isCancelled ? ((row.cancelled_by as 'client' | 'barber' | null) ?? null) : null,
       noShowCharged: row.no_show_charged,
       noShowChargeAmountUsd:
@@ -493,12 +489,12 @@ export class BookingsService {
   }
 
   private async loadBookingServicesDetail(
-    bookingId: string,
+    bookingId: string
   ): Promise<ClientBookingServiceSummaryDto[]> {
     const { data, error } = await this.db
       .from('booking_services')
       .select(
-        'barber_service_id, booking_type, duration_minutes, base_price_usd, slot_type_surcharge_usd, price_usd, sort_order',
+        'barber_service_id, booking_type, duration_minutes, base_price_usd, slot_type_surcharge_usd, price_usd, sort_order'
       )
       .eq('booking_id', bookingId)
       .order('sort_order', { ascending: true });
@@ -664,7 +660,7 @@ export class BookingsService {
 
   private async notifyBarberOfBookingCancel(
     bookingId: string,
-    clientAuthId: string,
+    clientAuthId: string
   ): Promise<void> {
     const { data } = await this.db
       .from('bookings')
@@ -710,10 +706,7 @@ export class BookingsService {
 
     // TODO: enforce subscription
 
-    const initialStatus = this.resolveInitialBookingStatus(
-      ctx.barberProfile,
-      ctx.scheduledAtUtc
-    );
+    const initialStatus = this.resolveInitialBookingStatus(ctx.barberProfile, ctx.scheduledAtUtc);
     const nowIso = new Date().toISOString();
     const primary = ctx.services[0];
 
@@ -766,9 +759,7 @@ export class BookingsService {
       sort_order: idx,
     }));
 
-    const { error: childError } = await this.db
-      .from('booking_services')
-      .insert(bookingServiceRows);
+    const { error: childError } = await this.db.from('booking_services').insert(bookingServiceRows);
 
     if (childError) {
       // Best-effort rollback so the booking row doesn't linger without children
@@ -800,7 +791,7 @@ export class BookingsService {
 
     void this.conversationsService.markHasBookingIfConversationExists(
       ctx.barberProfile.user_id,
-      ctx.clientAuthId,
+      ctx.clientAuthId
     );
 
     return { booking };
@@ -893,7 +884,9 @@ export class BookingsService {
       serviceById.set(row.id, row);
     }
     if (serviceById.size !== requestedIds.length) {
-      throw new NotFoundException('One or more services were not found or inactive for this barber');
+      throw new NotFoundException(
+        'One or more services were not found or inactive for this barber'
+      );
     }
 
     // 4. Derive day-of-week and fetch the schedule for this day.
@@ -962,11 +955,7 @@ export class BookingsService {
     //    intersect [scheduledAtUtc, scheduledAtUtc + totalDurationMinutes).
     //    The DB-level exclusion constraint catches races; this makes the
     //    error message friendly when the conflict is already visible.
-    await this.assertNoOverlap(
-      dto.barberId,
-      scheduledAtUtc,
-      totalDurationMinutes,
-    );
+    await this.assertNoOverlap(dto.barberId, scheduledAtUtc, totalDurationMinutes);
 
     return {
       clientAuthId: authUserId,
@@ -986,7 +975,7 @@ export class BookingsService {
   private async assertNoOverlap(
     barberId: string,
     startUtc: Date,
-    totalDurationMinutes: number,
+    totalDurationMinutes: number
   ): Promise<void> {
     const blockEndMs = startUtc.getTime() + totalDurationMinutes * 60_000;
     // Longest individual service duration allowed is 60 min, bounded; grab any
@@ -1018,7 +1007,7 @@ export class BookingsService {
     schedule: BarberScheduleRow,
     bookingType: BookingTypeDto,
     sliceStartMinutes: number,
-    sliceEndMinutes: number,
+    sliceEndMinutes: number
   ): void {
     if (bookingType === BookingTypeDto.REGULAR) {
       if (!schedule.is_working) {
@@ -1032,7 +1021,7 @@ export class BookingsService {
         sliceEndMinutes,
         schedule.regular_start_time,
         schedule.regular_end_time,
-        'regular',
+        'regular'
       );
       return;
     }
@@ -1049,7 +1038,7 @@ export class BookingsService {
         sliceEndMinutes,
         schedule.after_hours_start,
         schedule.after_hours_end,
-        'after_hours',
+        'after_hours'
       );
       return;
     }
@@ -1066,7 +1055,7 @@ export class BookingsService {
       sliceEndMinutes,
       schedule.day_off_start_time,
       schedule.day_off_end_time,
-      'day_off',
+      'day_off'
     );
   }
 
@@ -1075,13 +1064,13 @@ export class BookingsService {
     sliceEnd: number,
     windowStart: string,
     windowEnd: string,
-    typeLabel: string,
+    typeLabel: string
   ): void {
     const start = this.timeToMinutes(windowStart);
     const end = this.timeToMinutes(windowEnd);
     if (sliceStart < start || sliceEnd > end) {
       throw new BadRequestException(
-        `A ${typeLabel} service in this booking does not fit inside the ${typeLabel} window for this day.`,
+        `A ${typeLabel} service in this booking does not fit inside the ${typeLabel} window for this day.`
       );
     }
   }
@@ -1162,5 +1151,24 @@ export class BookingsService {
     const additionalCost = Number((totalPrice - basePrice).toFixed(2));
 
     return { basePrice, additionalCost, totalPrice };
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Analytics — backed by the Postgres function get_barber_analytics
+  // ────────────────────────────────────────────────────────────
+
+  public async getAnalytics(
+    barberAuthId: string,
+    period: 'week' | 'month' | 'year'
+  ): Promise<Record<string, unknown>> {
+    const daysBack = period === 'week' ? 7 : period === 'month' ? 30 : 365;
+    const { data, error } = await this.db.rpc('get_barber_analytics', {
+      p_barber_id: barberAuthId,
+      p_days_back: daysBack,
+    });
+    if (error) throw new InternalServerErrorException('Failed to fetch analytics');
+
+    const payload = (data ?? {}) as Record<string, unknown>;
+    return { period, ...payload };
   }
 }
