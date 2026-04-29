@@ -17,13 +17,14 @@ This document covers every endpoint a barber user hits — from onboarding throu
 7. [Settings](#5-settings)
 8. [Bookings (one-off)](#6-bookings-one-off)
 9. [Recurring Bookings](#7-recurring-bookings)
-10. [Reviews](#8-reviews)
-11. [Conversations / Messaging](#9-conversations--messaging)
-12. [Push Notifications](#10-push-notifications)
-13. [Notification Settings](#11-notification-settings)
-14. [Analytics](#12-analytics)
-15. [Stripe Connect & No-Show Charges](#13-stripe-connect--no-show-charges)
-16. [Common Error Codes](#common-error-codes)
+10. [My Clients](#8-my-clients)
+11. [Reviews](#9-reviews)
+12. [Conversations / Messaging](#10-conversations--messaging)
+13. [Push Notifications](#11-push-notifications)
+14. [Notification Settings](#12-notification-settings)
+15. [Analytics](#13-analytics)
+16. [Stripe Connect & No-Show Charges](#14-stripe-connect--no-show-charges)
+17. [Common Error Codes](#common-error-codes)
 
 ---
 
@@ -662,7 +663,134 @@ Cancels the subscription. Future generated bookings are cancelled; past/complete
 
 ---
 
-## 8. Reviews
+## 8. My Clients
+
+The "My Clients" surface lets a barber browse every person who has ever booked them, then drill into one client to see their entire history + every upcoming appointment (one-off and recurring) + lifetime value.
+
+A user is a *client of barber X* if they have **at least one non-cancelled booking** with X. `no_show` counts (they were on the books); pure-cancelled clients are excluded. Aggregates are computed in the database (`get_barber_clients` / `get_barber_client_detail` Postgres functions) so list queries are constant-round-trip regardless of page size.
+
+> Guest / walk-in clients are not supported by the schema (`bookings.client_id` is a NOT NULL FK to `auth.users`). `isGuest` is therefore always `false`. Phone, date of birth, and barber-side notes columns also do not exist; those fields are intentionally omitted from the response.
+
+### 8.1 `GET /barber/clients`
+
+Page-based list of distinct clients with rolled-up stats.
+
+- **Auth:** required (barber)
+- **Query** (`ListBarberClientsQueryDto`):
+  | Param | Type | Required | Notes |
+  |---|---|---|---|
+  | `search` | string (≤100) | no | case-insensitive partial match on the client's `name` or auth `email` |
+  | `sortBy` | `'lastVisit' \| 'totalSpend' \| 'totalVisits' \| 'name'` | no | default `lastVisit` |
+  | `order` | `'asc' \| 'desc'` | no | default `desc` |
+  | `page` | int ≥ 1 | no | default `1` |
+  | `limit` | 1..100 | no | default `20` |
+  | `hasUpcoming` | boolean | no | when `true`, only clients with at least one future `pending`/`confirmed` booking |
+- **Response 200** (`ListBarberClientsResponseDto`):
+  ```ts
+  {
+    clients: [{
+      clientId: string;
+      name: string;
+      profilePhotoUrl: string | null;
+      email: string | null;            // pulled from auth.users
+      totalVisits: number;             // count of bookings with status='completed'
+      totalSpendUsd: number;           // SUM(price_usd) over completed bookings
+      firstVisitAt: string | null;     // ISO — earliest completed booking
+      lastVisitAt: string | null;      // ISO — latest completed booking
+      nextBookingAt: string | null;    // ISO — earliest future pending/confirmed booking
+      hasUpcoming: boolean;
+      isGuest: boolean;                // always false (see section preamble)
+    }];
+    pagination: {
+      currentPage: number;
+      totalPages: number;
+      limit: number;
+      hasNextPage: boolean;
+      totalClients: number;
+    };
+  }
+  ```
+
+### 8.2 `GET /barber/clients/:clientId`
+
+Full detail for one client, scoped to the authenticated barber. Returns **`404`** if the requested `clientId` has no non-cancelled booking with this barber — existence is never leaked via `403`.
+
+- **Auth:** required (barber)
+- **Path:** `clientId` is the auth user UUID of the client.
+- **Query** (`GetBarberClientDetailQueryDto`):
+  | Param | Type | Required | Notes |
+  |---|---|---|---|
+  | `pastPage` | int ≥ 1 | no | page index for `pastBookings`. Default `1`. |
+  | `pastLimit` | 1..50 | no | page size for `pastBookings`. Default `10`. |
+- **Response 200** (`BarberClientDetailDto`):
+  ```ts
+  {
+    client: {
+      id: string;
+      name: string;
+      profilePhotoUrl: string | null;
+      email: string | null;
+      createdAt: string | null;        // auth account creation
+      isGuest: boolean;                // always false
+    };
+    stats: {
+      totalVisits: number;
+      totalSpendUsd: number;
+      averageSpendUsd: number;         // totalSpendUsd / totalVisits, 0 when totalVisits=0
+      firstVisitAt: string | null;
+      lastVisitAt: string | null;
+      noShowCount: number;
+      cancellationCount: number;
+      favouriteService: { id: string; name: string } | null;  // most-used service in completed bookings, tie-break by most recent
+    };
+    upcomingBookings: [BarberClientBookingDto];   // status IN (pending, confirmed) AND scheduled_at > now(), ascending
+    pastBookings: {
+      items: [BarberClientBookingDto];            // scheduled_at < now(), descending — completed/cancelled/no_show all visible
+      pagination: {
+        currentPage: number;
+        totalPages: number;
+        limit: number;
+        hasNextPage: boolean;
+        totalBookings: number;
+      };
+    };
+    recurringSeries: [{
+      id: string;
+      dayOfWeek: number;               // 0..6
+      slotTime: string;                // 'HH:mm'
+      frequency: 'weekly' | 'biweekly';
+      status: RecurringStatus;
+      active: boolean;                 // true for status IN (active, pending_barber_approval, paused)
+      priceUsd: number;
+      service: { id, name };
+      nextOccurrenceAt: string | null; // ISO — next pending/confirmed materialised occurrence
+      startedAt: string;               // barberAcceptedAt or createdAt
+      cancelledAt: string | null;
+    }];
+  }
+  ```
+  `BarberClientBookingDto`:
+  ```ts
+  {
+    id: string;
+    status: BookingStatus;
+    scheduledAt: string;               // ISO — block start
+    totalDurationMinutes: number;      // total block duration including all services
+    bookingType: BookingType;          // type of the primary (first) service
+    services: [{ id, name, durationMinutes, bookingType, priceUsd }];
+    totalPriceUsd: number;
+    isRecurring: boolean;
+    recurringBookingId: string | null;
+    cancelledAt: string | null;
+    cancelledBy: 'client' | 'barber' | null;
+  }
+  ```
+
+> Recurring is materialised (Option A): every accepted recurring contract spawns real `bookings` rows for the next 60 days. The `upcomingBookings` array therefore already contains those occurrences (with `isRecurring: true`); `recurringSeries` lists the parent contracts for context only — no synthetic occurrences are generated.
+
+---
+
+## 9. Reviews
 
 ### 8.1 `GET /barber/reviews`
 
@@ -724,7 +852,7 @@ Aggregate breakdown for the reviews screen header (the bar chart with star-by-st
 
 ---
 
-## 9. Conversations / Messaging
+## 10. Conversations / Messaging
 
 Chat threads. Both barbers and clients use `/conversations`. **Only barbers can start a new thread.**
 
@@ -799,7 +927,7 @@ Start a thread with a client. If a thread already exists, returns the existing o
 
 ---
 
-## 10. Push Notifications
+## 11. Push Notifications
 
 Expo / FCM push tokens are stored per `(user_id, platform)`.
 
@@ -862,7 +990,7 @@ Page-paginated, newest first.
 
 ---
 
-## 11. Notification Settings
+## 12. Notification Settings
 
 Two independent toggles for what kinds of push notifications the barber receives.
 
@@ -887,7 +1015,7 @@ Two independent toggles for what kinds of push notifications the barber receives
 
 ---
 
-## 12. Analytics
+## 13. Analytics
 
 ### 12.1 `GET /bookings/analytics`
 
@@ -930,7 +1058,7 @@ Earnings analytics for the authenticated barber over a rolling window. Counts on
 
 ---
 
-## 13. Stripe Connect & No-Show Charges
+## 14. Stripe Connect & No-Show Charges
 
 To bill clients for no-shows, a barber must connect a **Stripe Express** account. The platform creates the account on demand, sends the barber to a Stripe-hosted onboarding URL, and tracks the resulting capabilities. Once `chargesEnabled = true`, the barber can turn on no-show charges (Section 5.4); the no-show flow on `PATCH /barber/bookings/:id/no-show` will charge the client's saved card via the Connect account using a destination charge.
 
