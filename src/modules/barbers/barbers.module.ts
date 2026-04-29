@@ -10,6 +10,10 @@ import {
 import { BarbersService } from './barbers.service';
 import { BarberServicesController } from './services/barber-services.controller';
 import { BarberServicesService } from './services/barber-services.service';
+import { BarberClientsController } from './clients/barber-clients.controller';
+import { BarberClientsService } from './clients/barber-clients.service';
+import { BarberHomeController } from './home/barber-home.controller';
+import { BarberHomeService } from './home/barber-home.service';
 import { BookingsModule } from '../bookings/bookings.module';
 import { PaymentsModule } from '../payments/payments.module';
 
@@ -28,8 +32,10 @@ import { PaymentsModule } from '../payments/payments.module';
     BarberProfileController,
     BarberSettingsController,
     BarberServicesController,
+    BarberClientsController,
+    BarberHomeController,
   ],
-  providers: [BarbersService, BarberServicesService],
+  providers: [BarbersService, BarberServicesService, BarberClientsService, BarberHomeService],
   exports: [BarberServicesService],
 })
 export class BarbersModule {}
