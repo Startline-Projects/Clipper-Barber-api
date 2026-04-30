@@ -72,7 +72,8 @@ export class BarberHomeService {
   }
 
   public async getHome(barberId: string, tzOverride?: string): Promise<BarberHomeResponseDto> {
-    const tz = await this.resolveTimezone(barberId, tzOverride);
+    const settings = await this.loadBarberSettings(barberId);
+    const tz = this.resolveTimezone(settings.timezone, tzOverride);
     const nowIso = new Date().toISOString();
 
     const { data, error } = await this.db.rpc('get_barber_home', {
@@ -97,6 +98,11 @@ export class BarberHomeService {
         },
         pendingApproval: { totalCount: 0, items: [] },
         schedule: { totalUpcomingToday: 0, items: [] },
+        allowAutoConfirm: settings.allowAutoConfirm,
+        autoConfirmToday: settings.autoConfirmToday,
+        recurringEnabled: settings.recurringEnabled,
+        noShowChargeEnabled: settings.noShowChargeEnabled,
+        noShowChargeAmountUsd: settings.noShowChargeAmountUsd,
       };
     }
 
@@ -117,6 +123,11 @@ export class BarberHomeService {
         totalUpcomingToday: Number(result.schedule.totalUpcomingToday ?? 0),
         items: (result.schedule.items ?? []).map(this.shapeScheduleItem),
       },
+      allowAutoConfirm: settings.allowAutoConfirm,
+      autoConfirmToday: settings.autoConfirmToday,
+      recurringEnabled: settings.recurringEnabled,
+      noShowChargeEnabled: settings.noShowChargeEnabled,
+      noShowChargeAmountUsd: settings.noShowChargeAmountUsd,
     };
   }
 
@@ -168,24 +179,46 @@ export class BarberHomeService {
   // recurring-time.util.ts. Invalid tz → 422.
   // ────────────────────────────────────────────────────────────
 
-  private async resolveTimezone(barberId: string, override?: string): Promise<string> {
+  private resolveTimezone(stored: string | null, override?: string): string {
     if (override !== undefined) {
       if (!this.isValidTimezone(override)) {
         throw new UnprocessableEntityException(`Invalid IANA timezone: ${override}`);
       }
       return override;
     }
+    if (stored && this.isValidTimezone(stored)) return stored;
+    return 'UTC';
+  }
 
+  private async loadBarberSettings(barberId: string): Promise<{
+    timezone: string | null;
+    allowAutoConfirm: boolean;
+    autoConfirmToday: boolean;
+    recurringEnabled: boolean;
+    noShowChargeEnabled: boolean;
+    noShowChargeAmountUsd: number | null;
+  }> {
     const { data, error } = await this.db
       .from('barbers')
-      .select('timezone')
+      .select(
+        'timezone, allow_auto_confirm, auto_confirm_today, recurring_enabled, no_show_charge_enabled, no_show_charge_amount_usd'
+      )
       .eq('user_id', barberId)
       .maybeSingle();
 
-    if (error) throw new InternalServerErrorException('Failed to load barber timezone');
-    const stored = (data?.timezone as string | null | undefined) ?? null;
-    if (stored && this.isValidTimezone(stored)) return stored;
-    return 'UTC';
+    if (error) throw new InternalServerErrorException('Failed to load barber settings');
+
+    return {
+      timezone: (data?.timezone as string | null | undefined) ?? null,
+      allowAutoConfirm: !!data?.allow_auto_confirm,
+      autoConfirmToday: !!data?.auto_confirm_today,
+      recurringEnabled: !!data?.recurring_enabled,
+      noShowChargeEnabled: !!data?.no_show_charge_enabled,
+      noShowChargeAmountUsd:
+        data?.no_show_charge_amount_usd !== null && data?.no_show_charge_amount_usd !== undefined
+          ? Number(data.no_show_charge_amount_usd)
+          : null,
+    };
   }
 
   private isValidTimezone(tz: string): boolean {

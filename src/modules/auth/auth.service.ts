@@ -120,7 +120,7 @@ export class AuthService {
       user_metadata: { onboarding_step: 3, onboarding_complete: true },
     });
 
-    return data as BarberProfileResponseDto;
+    return this.projectBarberProfile(data as Record<string, unknown>);
   }
 
   public async registerClient(dto: ClientRegisterDto): Promise<TokensResponseDto> {
@@ -226,9 +226,7 @@ export class AuthService {
         throw new NotFoundException('Barber profile not found');
       }
 
-      return this.projectCanonicalId(
-        data as Record<string, unknown>,
-      ) as unknown as BarberProfileResponseDto;
+      return this.projectBarberProfile(data as Record<string, unknown>);
     }
 
     const { data, error } = await this.client
@@ -254,6 +252,31 @@ export class AuthService {
   private projectCanonicalId(row: Record<string, unknown>): Record<string, unknown> {
     const { id: _internalId, user_id, ...rest } = row;
     return { id: user_id, ...rest };
+  }
+
+  private projectBarberProfile(row: Record<string, unknown>): BarberProfileResponseDto {
+    const {
+      id: _internalId,
+      user_id,
+      allow_auto_confirm,
+      auto_confirm_today,
+      recurring_enabled,
+      no_show_charge_enabled,
+      no_show_charge_amount_usd,
+      ...rest
+    } = row;
+    return {
+      ...(rest as Record<string, unknown>),
+      id: user_id,
+      allowAutoConfirm: !!allow_auto_confirm,
+      autoConfirmToday: !!auto_confirm_today,
+      recurringEnabled: !!recurring_enabled,
+      noShowChargeEnabled: !!no_show_charge_enabled,
+      noShowChargeAmountUsd:
+        no_show_charge_amount_usd !== null && no_show_charge_amount_usd !== undefined
+          ? Number(no_show_charge_amount_usd)
+          : null,
+    } as unknown as BarberProfileResponseDto;
   }
 
   public async forgotPassword(email: string): Promise<SuccessResponseDto> {

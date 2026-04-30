@@ -95,4 +95,10 @@ export class BarberHomeResponseDto {
   @ApiProperty({ type: BarberHomeTodayDto }) today: BarberHomeTodayDto;
   @ApiProperty({ type: BarberHomePendingDto }) pendingApproval: BarberHomePendingDto;
   @ApiProperty({ type: BarberHomeScheduleDto }) schedule: BarberHomeScheduleDto;
+
+  @ApiProperty() allowAutoConfirm: boolean;
+  @ApiProperty() autoConfirmToday: boolean;
+  @ApiProperty() recurringEnabled: boolean;
+  @ApiProperty() noShowChargeEnabled: boolean;
+  @ApiProperty({ nullable: true, type: Number }) noShowChargeAmountUsd: number | null;
 }

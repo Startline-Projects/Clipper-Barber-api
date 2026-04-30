@@ -613,9 +613,30 @@ export class BarbersService {
 
   // Profile rows still carry both the internal `id` and `user_id`. Expose
   // only the auth id under `id` so every API speaks the same identifier.
+  // Settings columns are remapped to their camelCase response field names.
   private projectCanonicalId(row: Record<string, unknown>): Record<string, unknown> {
-    const { id: _internalId, user_id, ...rest } = row;
-    return { id: user_id, ...rest };
+    const {
+      id: _internalId,
+      user_id,
+      allow_auto_confirm,
+      auto_confirm_today,
+      recurring_enabled,
+      no_show_charge_enabled,
+      no_show_charge_amount_usd,
+      ...rest
+    } = row;
+    return {
+      id: user_id,
+      ...rest,
+      allowAutoConfirm: !!allow_auto_confirm,
+      autoConfirmToday: !!auto_confirm_today,
+      recurringEnabled: !!recurring_enabled,
+      noShowChargeEnabled: !!no_show_charge_enabled,
+      noShowChargeAmountUsd:
+        no_show_charge_amount_usd !== null && no_show_charge_amount_usd !== undefined
+          ? Number(no_show_charge_amount_usd)
+          : null,
+    };
   }
 
   // ────────────────────────────────────────────────────────────

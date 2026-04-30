@@ -47,5 +47,20 @@ export class BarberProfileResponseDto {
   onboarding_complete: boolean;
 
   @ApiProperty()
+  allowAutoConfirm: boolean;
+
+  @ApiProperty()
+  autoConfirmToday: boolean;
+
+  @ApiProperty()
+  recurringEnabled: boolean;
+
+  @ApiProperty()
+  noShowChargeEnabled: boolean;
+
+  @ApiProperty({ nullable: true, type: Number })
+  noShowChargeAmountUsd: number | null;
+
+  @ApiProperty()
   created_at: string;
 }
