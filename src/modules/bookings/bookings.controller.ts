@@ -47,7 +47,7 @@ export class BookingsController {
 
   @Post('preview')
   @Roles('client')
-  @UseGuards(SubscriptionRequiredGuard)
+  // @UseGuards(SubscriptionRequiredGuard)
   @HttpCode(200)
   @ApiOperation({ summary: 'Preview a booking with pricing breakdown — no row is created' })
   @ApiBody({ type: PreviewBookingDto })
@@ -65,7 +65,7 @@ export class BookingsController {
 
   @Post('confirm')
   @Roles('client')
-  @UseGuards(SubscriptionRequiredGuard)
+  // @UseGuards(SubscriptionRequiredGuard)
   @ApiOperation({ summary: 'Confirm a previewed booking — inserts a booking row' })
   @ApiBody({ type: PreviewBookingDto })
   @ApiResponse({

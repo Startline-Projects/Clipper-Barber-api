@@ -13,25 +13,25 @@ export class SubscriptionRequiredGuard implements CanActivate {
 
   public async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<{ user: SupabaseUserPayload }>();
-    const authUserId = request.user?.sub;
+    // const authUserId = request.user?.sub;
 
-    if (!authUserId) {
-      throw new SubscriptionRequired();
-    }
+    // if (!authUserId) {
+    //   throw new SubscriptionRequired();
+    // }
 
-    const db = this.supabaseService.getClient();
-    const { data, error } = await db.rpc('is_client_subscribed', {
-      p_client_user_id: authUserId,
-    });
+    // const db = this.supabaseService.getClient();
+    // const { data, error } = await db.rpc('is_client_subscribed', {
+    //   p_client_user_id: authUserId,
+    // });
 
-    if (error) {
-      // Fail closed — if the entitlement check itself errors, treat as unsub.
-      throw new SubscriptionRequired();
-    }
+    // if (error) {
+    //   // Fail closed — if the entitlement check itself errors, treat as unsub.
+    //   throw new SubscriptionRequired();
+    // }
 
-    if (data !== true) {
-      throw new SubscriptionRequired();
-    }
+    // if (data !== true) {
+    //   throw new SubscriptionRequired();
+    // }
 
     return true;
   }
