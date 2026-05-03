@@ -103,6 +103,8 @@ export class BarberHomeService {
         recurringEnabled: settings.recurringEnabled,
         noShowChargeEnabled: settings.noShowChargeEnabled,
         noShowChargeAmountUsd: settings.noShowChargeAmountUsd,
+        stripeConnected: settings.stripeConnected,
+        locationSet: settings.locationSet,
       };
     }
 
@@ -128,6 +130,8 @@ export class BarberHomeService {
       recurringEnabled: settings.recurringEnabled,
       noShowChargeEnabled: settings.noShowChargeEnabled,
       noShowChargeAmountUsd: settings.noShowChargeAmountUsd,
+      stripeConnected: settings.stripeConnected,
+      locationSet: settings.locationSet,
     };
   }
 
@@ -197,11 +201,13 @@ export class BarberHomeService {
     recurringEnabled: boolean;
     noShowChargeEnabled: boolean;
     noShowChargeAmountUsd: number | null;
+    stripeConnected: boolean;
+    locationSet: boolean;
   }> {
     const { data, error } = await this.db
       .from('barbers')
       .select(
-        'timezone, allow_auto_confirm, auto_confirm_today, recurring_enabled, no_show_charge_enabled, no_show_charge_amount_usd'
+        'timezone, allow_auto_confirm, auto_confirm_today, recurring_enabled, no_show_charge_enabled, no_show_charge_amount_usd, stripe_connect_account_id, latitude, longitude'
       )
       .eq('user_id', barberId)
       .maybeSingle();
@@ -218,6 +224,12 @@ export class BarberHomeService {
         data?.no_show_charge_amount_usd !== null && data?.no_show_charge_amount_usd !== undefined
           ? Number(data.no_show_charge_amount_usd)
           : null,
+      stripeConnected: !!data?.stripe_connect_account_id,
+      locationSet:
+        data?.latitude !== null &&
+        data?.latitude !== undefined &&
+        data?.longitude !== null &&
+        data?.longitude !== undefined,
     };
   }
 

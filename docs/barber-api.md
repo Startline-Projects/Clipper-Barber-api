@@ -11,7 +11,7 @@ This document covers every endpoint a barber user hits — from onboarding throu
 1. [Conventions](#conventions)
 2. [Shared Enums](#shared-enums)
 3. [Auth & Onboarding](#1-auth--onboarding)
-4. [Profile](#2-profile)
+4. [Profile & Home Dashboard](#2-profile)
 5. [Services](#3-services)
 6. [Schedule](#4-schedule)
 7. [Settings](#5-settings)
@@ -274,6 +274,61 @@ Update any subset of profile fields. Send `multipart/form-data` if uploading a p
   | `bio` | string | max 500 |
   | `instagramHandle` | string | letters/numbers/`._` only, no `@` |
 - **Response 200:** `BarberProfileResponseDto`
+
+### 2.3 `GET /barber/home`
+
+Single-call **home dashboard** payload: today's counts and earnings, the pending-approval queue, the next confirmed appointments, plus the relevant settings flags so the dashboard can render without a second round-trip.
+
+- **Auth:** required (barber)
+- **Query** (`GetBarberHomeQueryDto`):
+  | Param | Type | Required | Notes |
+  |---|---|---|---|
+  | `tz` | string | no | IANA timezone override (e.g. `Africa/Cairo`). Falls back to the barber profile timezone if omitted, then to UTC. Max 64 chars. |
+- **Response 200** (`BarberHomeResponseDto`):
+  ```ts
+  {
+    today: {
+      date: 'YYYY-MM-DD';                  // calendar date in the resolved timezone
+      timezone: string;                    // resolved IANA timezone, e.g. 'Africa/Cairo'
+      totalAppointments: number;           // bookings starting today, excluding cancelled
+      completedCount: number;
+      remainingCount: number;              // status confirmed/pending AND end_at > now()
+      earningsSoFarUsd: number;            // SUM(price_usd) over completed bookings starting today
+    };
+    pendingApproval: {
+      totalCount: number;                  // full count, NOT capped at items.length
+      items: [{
+        bookingId: string;
+        client: { id: string; fullName: string; profilePhotoUrl: string | null };
+        service: { id: string; name: string } | null;
+        scheduledAt: string;               // ISO timestamp
+        priceUsd: number;
+        status: BookingStatus;             // typically 'pending'
+        requestedAt: string;               // ISO timestamp (booking createdAt)
+      }];
+    };
+    schedule: {
+      totalUpcomingToday: number;          // full count of confirmed bookings remaining today
+      items: [{
+        bookingId: string;
+        client: { id: string; fullName: string; profilePhotoUrl: string | null };
+        service: { id: string; name: string; durationMinutes: number } | null;
+        scheduledAt: string;               // ISO timestamp
+        endAt: string;                     // ISO timestamp = scheduledAt + duration
+        minutesUntilStart: number;         // whole minutes from server now() until scheduledAt — re-derive client-side from scheduledAt for live ticking
+        priceUsd: number;
+        status: BookingStatus;             // typically 'confirmed'
+      }];
+    };
+    allowAutoConfirm: boolean;
+    autoConfirmToday: boolean;
+    recurringEnabled: boolean;
+    noShowChargeEnabled: boolean;
+    noShowChargeAmountUsd: number | null;
+  }
+  ```
+
+> The two `items` arrays are capped server-side; use `pendingApproval.totalCount` and `schedule.totalUpcomingToday` as the source of truth for "X more pending" / "Y more today" UI affordances and route the user to the full lists (`GET /barber/recurring-bookings?status=pending_barber_approval` for pending recurring offers, `GET /barber/bookings?timeframe=upcoming` for the schedule) when they tap through.
 
 ---
 
@@ -921,7 +976,7 @@ Start a thread with a client. If a thread already exists, returns the existing o
 
 - **Auth:** required (barber)
 - **Body:** `{ "clientId": "<auth user uuid of the client>" }`
-- **Response 201:** `{ "conversation": ConversationListItemDto }`
+- **Response 200:** `{ "conversation": ConversationListItemDto }` (idempotent — returns the existing thread if one already exists)
 
 > **Realtime:** Subscribe to Supabase Realtime on the `messages` table filtered by `conversation_id` to receive live updates between API polls.
 
@@ -1157,6 +1212,7 @@ The mobile app should treat `401` as a signal to call `POST /auth/refresh` once 
 | Auth | PATCH | `/auth/change-password` |
 | Profile | GET | `/barber/profile` |
 | Profile | PATCH | `/barber/profile` |
+| Home | GET | `/barber/home` |
 | Services | POST | `/barbers/:barberId/services` |
 | Services | GET | `/barbers/:barberId/services` |
 | Services | GET | `/barbers/:barberId/services/:serviceId` |

@@ -623,11 +623,16 @@ export class BarbersService {
       recurring_enabled,
       no_show_charge_enabled,
       no_show_charge_amount_usd,
+      stripe_connect_account_id,
+      latitude,
+      longitude,
       ...rest
     } = row;
     return {
       id: user_id,
       ...rest,
+      latitude,
+      longitude,
       allowAutoConfirm: !!allow_auto_confirm,
       autoConfirmToday: !!auto_confirm_today,
       recurringEnabled: !!recurring_enabled,
@@ -636,6 +641,12 @@ export class BarbersService {
         no_show_charge_amount_usd !== null && no_show_charge_amount_usd !== undefined
           ? Number(no_show_charge_amount_usd)
           : null,
+      stripeConnected: !!stripe_connect_account_id,
+      locationSet:
+        latitude !== null &&
+        latitude !== undefined &&
+        longitude !== null &&
+        longitude !== undefined,
     };
   }
 

@@ -1,4 +1,4 @@
-import { Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { SupabaseService } from '../../supabase/supabase.service';
 import { BookingTypeDto } from '../../bookings/dto/preview-booking.dto';
 import { BookingStatusDto } from '../dto/list-barber-bookings-query.dto';
@@ -108,10 +108,28 @@ interface RecurringRow {
 
 @Injectable()
 export class BarberClientsService {
+  private readonly logger = new Logger(BarberClientsService.name);
+
   constructor(private readonly supabaseService: SupabaseService) {}
 
   private get db() {
     return this.supabaseService.getClient();
+  }
+
+  private fail(label: string, error: unknown): never {
+    // Supabase-js returns { message, code, details, hint } — log all of it
+    // so we can see the real PostgREST/Postgres complaint instead of a
+    // generic 500 with no signal.
+    const e = error as { message?: string; code?: string; details?: string; hint?: string };
+    this.logger.error(
+      `[${label}] supabase error: ${JSON.stringify({
+        message: e?.message,
+        code: e?.code,
+        details: e?.details,
+        hint: e?.hint,
+      })}`
+    );
+    throw new InternalServerErrorException(`${label}: ${e?.message ?? 'unknown error'}`);
   }
 
   // ────────────────────────────────────────────────────────────
@@ -135,8 +153,7 @@ export class BarberClientsService {
       p_limit: limit,
       p_has_upcoming: query.hasUpcoming ?? false,
     });
-
-    if (error) throw new InternalServerErrorException('Failed to fetch clients');
+    if (error) this.fail('listClients rpc(get_barber_clients)', error);
 
     const result = (data ?? { total: 0, items: [] }) as RpcListResult;
     const totalClients = result.total ?? 0;
@@ -186,7 +203,7 @@ export class BarberClientsService {
       p_barber_id: barberId,
       p_client_id: clientId,
     });
-    if (rpcError) throw new InternalServerErrorException('Failed to fetch client detail');
+    if (rpcError) this.fail('getClientDetail rpc(get_barber_client_detail)', rpcError);
 
     // RPC returns NULL when no non-cancelled booking exists between this
     // barber and this client. Surface as 404 — the spec is explicit that we
@@ -253,7 +270,7 @@ export class BarberClientsService {
       .order('scheduled_at', { ascending: true })
       .order('id', { ascending: true });
 
-    if (error) throw new InternalServerErrorException('Failed to fetch upcoming bookings');
+    if (error) this.fail('fetchUpcomingBookings', error);
 
     return this.hydrateBookings((data ?? []) as BookingRow[]);
   }
@@ -273,7 +290,7 @@ export class BarberClientsService {
       .eq('client_id', clientId)
       .lt('scheduled_at', nowIso);
 
-    if (countErr) throw new InternalServerErrorException('Failed to count past bookings');
+    if (countErr) this.fail('fetchPastBookings count', countErr);
 
     const totalBookings = count ?? 0;
     const totalPages = Math.max(1, Math.ceil(totalBookings / limit));
@@ -291,7 +308,7 @@ export class BarberClientsService {
       .order('id', { ascending: false })
       .range(startIndex, startIndex + limit - 1);
 
-    if (error) throw new InternalServerErrorException('Failed to fetch past bookings');
+    if (error) this.fail('fetchPastBookings', error);
 
     const items = await this.hydrateBookings((data ?? []) as BookingRow[]);
 
@@ -320,7 +337,7 @@ export class BarberClientsService {
       .in('booking_id', bookingIds)
       .order('sort_order', { ascending: true });
 
-    if (serviceErr) throw new InternalServerErrorException('Failed to fetch booking services');
+    if (serviceErr) this.fail('hydrateBookings booking_services', serviceErr);
     const services = (serviceRows ?? []) as BookingServiceRow[];
 
     const serviceIds = Array.from(new Set(services.map((s) => s.barber_service_id)));
@@ -374,7 +391,7 @@ export class BarberClientsService {
       .select('id, name, duration_minutes')
       .in('id', serviceIds);
 
-    if (error) throw new InternalServerErrorException('Failed to fetch services');
+    if (error) this.fail('fetchBarberServices', error);
 
     for (const s of (data ?? []) as BarberServiceLite[]) {
       map.set(s.id, s);
@@ -401,7 +418,7 @@ export class BarberClientsService {
       .eq('client_id', clientId)
       .order('created_at', { ascending: false });
 
-    if (error) throw new InternalServerErrorException('Failed to fetch recurring series');
+    if (error) this.fail('fetchRecurringSeries', error);
 
     const rows = (data ?? []) as RecurringRow[];
     if (rows.length === 0) return [];
@@ -444,7 +461,7 @@ export class BarberClientsService {
       .gte('scheduled_at', nowIso)
       .order('scheduled_at', { ascending: true });
 
-    if (error) throw new InternalServerErrorException('Failed to fetch next occurrences');
+    if (error) this.fail('fetchNextRecurringOccurrences', error);
 
     for (const row of data ?? []) {
       const id = row.recurring_booking_id as string;

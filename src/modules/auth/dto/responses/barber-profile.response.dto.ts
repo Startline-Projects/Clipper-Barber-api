@@ -61,6 +61,12 @@ export class BarberProfileResponseDto {
   @ApiProperty({ nullable: true, type: Number })
   noShowChargeAmountUsd: number | null;
 
+  @ApiProperty({ description: 'True when the barber has a Stripe Connect account on file' })
+  stripeConnected: boolean;
+
+  @ApiProperty({ description: 'True when both latitude and longitude are set on the profile' })
+  locationSet: boolean;
+
   @ApiProperty()
   created_at: string;
 }
