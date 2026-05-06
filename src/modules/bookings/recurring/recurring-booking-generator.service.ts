@@ -8,6 +8,14 @@ import {
 
 const RECURRING_WINDOW_DAYS = 60;
 
+export type ArrangementFrequency =
+  | 'weekly'
+  | 'biweekly'
+  | 'every_n_weeks'
+  | 'monthly';
+
+export type ArrangementEndType = 'none' | 'after_count' | 'on_date';
+
 interface RecurringBookingRow {
   id: string;
   client_id: string;
@@ -15,15 +23,36 @@ interface RecurringBookingRow {
   barber_service_id: string;
   day_of_week: number;
   slot_time: string;
-  frequency: 'weekly' | 'biweekly';
+  frequency: ArrangementFrequency;
   price_usd: string | number;
   duration_minutes: number | null;
   status: string;
+  initiator: 'client' | 'barber';
+  interval_n: number | null;
+  end_type: ArrangementEndType;
+  end_count: number | null;
+  end_date: string | null;
   window_start_date: string | null;
   pause_start_date: string | null;
   pause_end_date: string | null;
   paused_by: 'client' | 'barber' | null;
 }
+
+export interface OccurrenceSpec {
+  dayOfWeek: number;
+  timeOfDay: string; // HH:mm local
+  frequency: ArrangementFrequency;
+  intervalN: number | null;
+  startDate: string; // YYYY-MM-DD local
+  endType: ArrangementEndType;
+  endCount: number | null;
+  endDate: string | null;
+  timezone: string;
+  horizonDays: number;
+}
+
+// Horizon for barber-initiated arrangement top-up (spec: ~8 weeks ahead).
+export const ARRANGEMENT_HORIZON_DAYS = 56;
 
 interface BarberRow {
   user_id: string;
@@ -93,12 +122,24 @@ export class RecurringBookingGeneratorService {
 
     const primary = serviceSnapshots[0];
 
+    const horizonDays =
+      recurring.initiator === 'barber' ? ARRANGEMENT_HORIZON_DAYS : RECURRING_WINDOW_DAYS;
     const targetDates = this.computeTargetDates(
       recurring.window_start_date,
       recurring.day_of_week,
       recurring.frequency,
       recurring.pause_start_date,
       recurring.pause_end_date,
+      {
+        intervalN: recurring.interval_n,
+        endType: recurring.end_type,
+        endCount: recurring.end_count,
+        endDate: recurring.end_date,
+        horizonDays,
+        existingCountConsumed: recurring.initiator === 'barber'
+          ? await this.countAlreadyGenerated(recurring.id)
+          : 0,
+      },
     );
 
     if (targetDates.length === 0) return;
@@ -277,7 +318,7 @@ export class RecurringBookingGeneratorService {
     const { data, error } = await this.db
       .from('recurring_bookings')
       .select(
-        'id, client_id, barber_id, barber_service_id, day_of_week, slot_time, frequency, price_usd, duration_minutes, status, window_start_date, pause_start_date, pause_end_date, paused_by',
+        'id, client_id, barber_id, barber_service_id, day_of_week, slot_time, frequency, price_usd, duration_minutes, status, initiator, interval_n, end_type, end_count, end_date, window_start_date, pause_start_date, pause_end_date, paused_by',
       )
       .eq('id', id)
       .maybeSingle();
@@ -335,45 +376,251 @@ export class RecurringBookingGeneratorService {
     return set;
   }
 
-  // weekly: every matching day-of-week in window.
-  // biweekly: first occurrence on or after window_start_date matching
-  // day-of-week, then every 14 days.
   private computeTargetDates(
     windowStartLocal: string,
     dayOfWeek: number,
-    frequency: 'weekly' | 'biweekly',
+    frequency: ArrangementFrequency,
     pauseStart: string | null,
     pauseEnd: string | null,
+    extras: {
+      intervalN: number | null;
+      endType: ArrangementEndType;
+      endCount: number | null;
+      endDate: string | null;
+      horizonDays: number;
+      existingCountConsumed: number;
+    },
   ): string[] {
-    const [y, m, d] = windowStartLocal.split('-').map(Number);
-    const startMs = Date.UTC(y, m - 1, d);
-    const firstMatchMs = this.firstMatchingDowOnOrAfter(startMs, dayOfWeek);
+    const dates = computeOccurrenceDatesLocal({
+      startDate: windowStartLocal,
+      dayOfWeek,
+      frequency,
+      intervalN: extras.intervalN,
+      endType: extras.endType,
+      endCount: extras.endCount,
+      endDate: extras.endDate,
+      horizonDays: extras.horizonDays,
+      existingCountConsumed: extras.existingCountConsumed,
+    });
 
-    const stepMs = (frequency === 'weekly' ? 7 : 14) * 86_400_000;
-    const endMs = startMs + (RECURRING_WINDOW_DAYS - 1) * 86_400_000;
+    if (!pauseStart) return dates;
+    return dates.filter((iso) => {
+      if (iso < pauseStart) return true;
+      if (pauseEnd && iso > pauseEnd) return true;
+      return false;
+    });
+  }
 
-    const dates: string[] = [];
-    for (let ms = firstMatchMs; ms <= endMs; ms += stepMs) {
-      const iso = this.utcMsToDateStr(ms);
-      if (pauseStart && iso >= pauseStart) {
-        if (!pauseEnd || iso <= pauseEnd) continue;
+  // Pure helper. Composes UTC datetimes for the next `count` occurrences
+  // from the spec, useful for both the conflict check at offer creation
+  // and the "next occurrences" preview in API responses. Does not touch
+  // the DB.
+  public previewOccurrencesUtc(spec: OccurrenceSpec, count: number): Date[] {
+    const dates = computeOccurrenceDatesLocal({
+      startDate: spec.startDate,
+      dayOfWeek: spec.dayOfWeek,
+      frequency: spec.frequency,
+      intervalN: spec.intervalN,
+      endType: spec.endType,
+      endCount: spec.endCount,
+      endDate: spec.endDate,
+      horizonDays: spec.horizonDays,
+      existingCountConsumed: 0,
+    });
+    return dates
+      .slice(0, count)
+      .map((d) => composeUtcFromLocal(d, spec.timeOfDay, spec.timezone));
+  }
+
+  // For the offer-creation conflict check: returns each candidate datetime
+  // that already collides with an existing one-off booking, recurring
+  // booking, or live arrangement on this barber's calendar.
+  public async findCalendarConflicts(
+    barberId: string,
+    candidates: Date[],
+    durationMinutes: number,
+    excludeRecurringId: string | null,
+  ): Promise<{
+    scheduledAt: string;
+    conflictingBookingId: string | null;
+    reason: 'one_off_booking' | 'recurring_booking' | 'recurring_arrangement';
+  }[]> {
+    if (candidates.length === 0) return [];
+
+    const minMs = Math.min(...candidates.map((c) => c.getTime()));
+    const maxMs = Math.max(...candidates.map((c) => c.getTime())) + durationMinutes * 60_000;
+    const leadMs = 4 * 60 * 60_000;
+
+    let bookingsQuery = this.db
+      .from('bookings')
+      .select('id, scheduled_at, duration_minutes, recurring_booking_id')
+      .eq('barber_id', barberId)
+      .gte('scheduled_at', new Date(minMs - leadMs).toISOString())
+      .lte('scheduled_at', new Date(maxMs).toISOString())
+      .neq('status', 'cancelled');
+
+    if (excludeRecurringId) {
+      bookingsQuery = bookingsQuery.or(
+        `recurring_booking_id.is.null,recurring_booking_id.neq.${excludeRecurringId}`,
+      );
+    }
+
+    const { data: bookingRows, error: bookingsErr } = await bookingsQuery;
+    if (bookingsErr) {
+      throw new InternalServerErrorException('Failed to query existing bookings');
+    }
+
+    const conflicts: {
+      scheduledAt: string;
+      conflictingBookingId: string | null;
+      reason: 'one_off_booking' | 'recurring_booking' | 'recurring_arrangement';
+    }[] = [];
+
+    for (const cand of candidates) {
+      const candStart = cand.getTime();
+      const candEnd = candStart + durationMinutes * 60_000;
+      for (const b of bookingRows ?? []) {
+        const bStart = new Date(b.scheduled_at as string).getTime();
+        const bDuration = (b.duration_minutes as number | null) ?? 0;
+        const bEnd = bStart + bDuration * 60_000;
+        if (bStart < candEnd && bEnd > candStart) {
+          conflicts.push({
+            scheduledAt: cand.toISOString(),
+            conflictingBookingId: b.id as string,
+            reason:
+              (b.recurring_booking_id as string | null) === null
+                ? 'one_off_booking'
+                : 'recurring_booking',
+          });
+          break;
+        }
       }
-      dates.push(iso);
+    }
+
+    return conflicts;
+  }
+
+  private async countAlreadyGenerated(recurringBookingId: string): Promise<number> {
+    const { count, error } = await this.db
+      .from('bookings')
+      .select('id', { head: true, count: 'exact' })
+      .eq('recurring_booking_id', recurringBookingId)
+      .neq('status', 'cancelled');
+    if (error) throw new InternalServerErrorException('Failed to count generated bookings');
+    return count ?? 0;
+  }
+}
+
+// ────────────────────────────────────────────────────────────
+// Pure occurrence-date computation. Exported for testing.
+//
+// Returns calendar dates (YYYY-MM-DD) inside the rolling horizon,
+// respecting the end condition. The caller turns each date into
+// a UTC datetime by composing it with timeOfDay + timezone.
+// ────────────────────────────────────────────────────────────
+
+interface OccurrenceArgs {
+  startDate: string;
+  dayOfWeek: number;
+  frequency: ArrangementFrequency;
+  intervalN: number | null;
+  endType: ArrangementEndType;
+  endCount: number | null;
+  endDate: string | null;
+  horizonDays: number;
+  // For top-up: how many occurrences have already been generated. Counts
+  // toward end_count so we don't exceed the configured total.
+  existingCountConsumed: number;
+}
+
+export function computeOccurrenceDatesLocal(args: OccurrenceArgs): string[] {
+  const {
+    startDate,
+    dayOfWeek,
+    frequency,
+    intervalN,
+    endType,
+    endCount,
+    endDate,
+    horizonDays,
+    existingCountConsumed,
+  } = args;
+
+  const [y, m, d] = startDate.split('-').map(Number);
+  const startUtcMs = Date.UTC(y, m - 1, d);
+  const horizonEndMs = startUtcMs + (horizonDays - 1) * 86_400_000;
+
+  const remainingByCount =
+    endType === 'after_count' && endCount !== null
+      ? Math.max(0, endCount - existingCountConsumed)
+      : Number.POSITIVE_INFINITY;
+
+  const endDateMs = (() => {
+    if (endType !== 'on_date' || !endDate) return Number.POSITIVE_INFINITY;
+    const [ey, em, ed] = endDate.split('-').map(Number);
+    return Date.UTC(ey, em - 1, ed);
+  })();
+
+  const dates: string[] = [];
+
+  if (frequency === 'monthly') {
+    // Anchor: start_date itself (day-of-week constraint is informational
+    // for monthly — we keep the same calendar day each month and clamp
+    // to the last day of shorter months).
+    let yi = y;
+    let mi = m;
+    while (true) {
+      const dayInMonth = clampDayToMonth(yi, mi, d);
+      const ms = Date.UTC(yi, mi - 1, dayInMonth);
+      if (ms > horizonEndMs) break;
+      if (ms > endDateMs) break;
+      if (dates.length >= remainingByCount) break;
+      if (ms >= startUtcMs) {
+        dates.push(utcMsToDateStr(ms));
+      }
+      mi += 1;
+      if (mi > 12) {
+        mi = 1;
+        yi += 1;
+      }
     }
     return dates;
   }
 
-  private firstMatchingDowOnOrAfter(startUtcMs: number, dow: number): number {
-    const startDow = new Date(startUtcMs).getUTCDay();
-    const diff = (dow - startDow + 7) % 7;
-    return startUtcMs + diff * 86_400_000;
-  }
+  // Weekly / biweekly / every_n_weeks share the same shape: snap to the
+  // first matching day_of_week on or after start_date, then step by N weeks.
+  const stepWeeks = (() => {
+    if (frequency === 'weekly') return 1;
+    if (frequency === 'biweekly') return 2;
+    if (frequency === 'every_n_weeks') return Math.max(2, intervalN ?? 2);
+    return 1;
+  })();
+  const stepMs = stepWeeks * 7 * 86_400_000;
+  const firstMs = firstMatchingDowOnOrAfter(startUtcMs, dayOfWeek);
 
-  private utcMsToDateStr(ms: number): string {
-    const day = new Date(ms);
-    const y = day.getUTCFullYear();
-    const m = (day.getUTCMonth() + 1).toString().padStart(2, '0');
-    const d = day.getUTCDate().toString().padStart(2, '0');
-    return `${y}-${m}-${d}`;
+  for (let ms = firstMs; ms <= horizonEndMs; ms += stepMs) {
+    if (ms > endDateMs) break;
+    if (dates.length >= remainingByCount) break;
+    dates.push(utcMsToDateStr(ms));
   }
+  return dates;
+}
+
+function firstMatchingDowOnOrAfter(startUtcMs: number, dow: number): number {
+  const startDow = new Date(startUtcMs).getUTCDay();
+  const diff = (dow - startDow + 7) % 7;
+  return startUtcMs + diff * 86_400_000;
+}
+
+function utcMsToDateStr(ms: number): string {
+  const day = new Date(ms);
+  const yy = day.getUTCFullYear();
+  const mm = (day.getUTCMonth() + 1).toString().padStart(2, '0');
+  const dd = day.getUTCDate().toString().padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
+function clampDayToMonth(year: number, month1to12: number, desiredDay: number): number {
+  const lastDay = new Date(Date.UTC(year, month1to12, 0)).getUTCDate();
+  return Math.min(desiredDay, lastDay);
 }

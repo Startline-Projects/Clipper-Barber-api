@@ -12,6 +12,12 @@ import {
 import { RecurringBookingsService } from './recurring/recurring.service';
 import { RecurringBookingGeneratorService } from './recurring/recurring-booking-generator.service';
 import { RecurringBookingsCron } from './recurring/recurring.cron';
+import {
+  BarberRecurringArrangementsController,
+  ClientRecurringArrangementsController,
+} from './recurring/recurring-arrangements.controller';
+import { RecurringArrangementsService } from './recurring/recurring-arrangements.service';
+import { RecurringArrangementsCron } from './recurring/recurring-arrangements.cron';
 import { MessagesModule } from '../messages/messages.module';
 import { PaymentsModule } from '../payments/payments.module';
 
@@ -23,6 +29,8 @@ import { PaymentsModule } from '../payments/payments.module';
     ClientRecurringBookingsController,
     ClientRecurringSlotsController,
     BarberRecurringBookingsController,
+    BarberRecurringArrangementsController,
+    ClientRecurringArrangementsController,
   ],
   providers: [
     BookingsService,
@@ -32,6 +40,8 @@ import { PaymentsModule } from '../payments/payments.module';
     RecurringBookingsService,
     RecurringBookingGeneratorService,
     RecurringBookingsCron,
+    RecurringArrangementsService,
+    RecurringArrangementsCron,
   ],
   exports: [
     AvailabilityService,
@@ -39,6 +49,7 @@ import { PaymentsModule } from '../payments/payments.module';
     BookingCompletionService,
     RecurringBookingsService,
     RecurringBookingGeneratorService,
+    RecurringArrangementsService,
   ],
 })
 export class BookingsModule {}

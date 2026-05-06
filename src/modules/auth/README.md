@@ -71,7 +71,7 @@ Service Usage
 Supabase Auth (Admin API) Create/delete/update users, server-side sign-out
 Supabase Auth (Anon Client) signInWithPassword, refreshSession
 Supabase Database barbers and clients table reads/writes
-Supabase Storage Profile photo upload to profile-photos bucket
+Supabase Storage Profile photo upload to images bucket (under profiles/<userId>/)
 NestJS Modules
 MulterModule — in-memory file handling (5 MB limit)
 @nestjs/swagger — full Swagger annotation on all endpoints 6. Public API

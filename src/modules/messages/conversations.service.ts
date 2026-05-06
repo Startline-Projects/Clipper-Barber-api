@@ -250,25 +250,41 @@ export class ConversationsService {
   }
 
   // ────────────────────────────────────────────────────────────
-  // Barber-only: start a new conversation with a client
+  // Start a new conversation. Either party may initiate:
+  // a barber passes the client's user id, a client passes the barber's user id.
   // ────────────────────────────────────────────────────────────
 
   public async startConversation(
-    barberId: string,
-    clientId: string,
+    initiatorId: string,
+    initiatorRole: SenderRole,
+    otherUserId: string,
   ): Promise<ConversationDetailResponseDto> {
-    if (barberId === clientId) {
+    if (initiatorId === otherUserId) {
       throw new BadRequestException('Cannot start a conversation with yourself');
     }
 
-    // Verify client exists — fail fast with a 404 rather than a FK error.
-    const { data: clientRow, error: clientError } = await this.db
-      .from('clients')
-      .select('user_id')
-      .eq('user_id', clientId)
-      .maybeSingle();
-    if (clientError) throw new InternalServerErrorException('Failed to verify client');
-    if (!clientRow) throw new NotFoundException('Client not found');
+    const barberId = initiatorRole === 'barber' ? initiatorId : otherUserId;
+    const clientId = initiatorRole === 'client' ? initiatorId : otherUserId;
+
+    // Verify the other party exists in their respective profile table —
+    // fail fast with a 404 rather than a FK error from the insert.
+    if (initiatorRole === 'barber') {
+      const { data: clientRow, error: clientError } = await this.db
+        .from('clients')
+        .select('user_id')
+        .eq('user_id', clientId)
+        .maybeSingle();
+      if (clientError) throw new InternalServerErrorException('Failed to verify client');
+      if (!clientRow) throw new NotFoundException('Client not found');
+    } else {
+      const { data: barberRow, error: barberError } = await this.db
+        .from('barbers')
+        .select('user_id')
+        .eq('user_id', barberId)
+        .maybeSingle();
+      if (barberError) throw new InternalServerErrorException('Failed to verify barber');
+      if (!barberRow) throw new NotFoundException('Barber not found');
+    }
 
     const hasBooking = await this.clientHasActiveBookingWithBarber(barberId, clientId);
 
@@ -285,11 +301,11 @@ export class ConversationsService {
         .select(this.CONVERSATION_SELECT)
         .single();
       if (!updateError && updated) {
-        return this.buildConversationDetail(updated as ConversationRow, 'barber');
+        return this.buildConversationDetail(updated as ConversationRow, initiatorRole);
       }
     }
 
-    return this.buildConversationDetail(conversation, 'barber');
+    return this.buildConversationDetail(conversation, initiatorRole);
   }
 
   // ────────────────────────────────────────────────────────────

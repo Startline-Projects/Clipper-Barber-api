@@ -65,12 +65,17 @@ const BARBER_TYPES: ReadonlySet<NotificationTypeDto> = new Set([
   NotificationTypeDto.NEW_RECURRING_REQUEST,
   NotificationTypeDto.RECURRING_CANCELLED,
   NotificationTypeDto.RECURRING_PAUSED,
+  NotificationTypeDto.RECURRING_ARRANGEMENT_ACCEPTED,
+  NotificationTypeDto.RECURRING_ARRANGEMENT_REJECTED,
 ]);
 
 const RECURRING_CATEGORY_TYPES: ReadonlySet<NotificationTypeDto> = new Set([
   NotificationTypeDto.NEW_RECURRING_REQUEST,
   NotificationTypeDto.RECURRING_CANCELLED,
   NotificationTypeDto.RECURRING_PAUSED,
+  NotificationTypeDto.RECURRING_ARRANGEMENT_OFFERED,
+  NotificationTypeDto.RECURRING_ARRANGEMENT_ACCEPTED,
+  NotificationTypeDto.RECURRING_ARRANGEMENT_REJECTED,
 ]);
 
 const TITLE_BY_TYPE: Record<NotificationTypeDto, string> = {
@@ -86,6 +91,9 @@ const TITLE_BY_TYPE: Record<NotificationTypeDto, string> = {
   [NotificationTypeDto.RECURRING_EXPIRING]: 'Recurring Expiring',
   // NEW_MESSAGE builds its title dynamically from the sender's name.
   [NotificationTypeDto.NEW_MESSAGE]: 'New Message',
+  [NotificationTypeDto.RECURRING_ARRANGEMENT_OFFERED]: 'Recurring Arrangement Offer',
+  [NotificationTypeDto.RECURRING_ARRANGEMENT_ACCEPTED]: 'Recurring Arrangement Accepted',
+  [NotificationTypeDto.RECURRING_ARRANGEMENT_REJECTED]: 'Recurring Arrangement Declined',
 };
 
 interface NotificationRow {

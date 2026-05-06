@@ -12,6 +12,9 @@ export enum NotificationTypeDto {
   RECURRING_REFUSED = 'recurring_refused',
   RECURRING_EXPIRING = 'recurring_expiring',
   NEW_MESSAGE = 'new_message',
+  RECURRING_ARRANGEMENT_OFFERED = 'recurring_arrangement_offered',
+  RECURRING_ARRANGEMENT_ACCEPTED = 'recurring_arrangement_accepted',
+  RECURRING_ARRANGEMENT_REJECTED = 'recurring_arrangement_rejected',
 }
 
 export class NotificationDto {

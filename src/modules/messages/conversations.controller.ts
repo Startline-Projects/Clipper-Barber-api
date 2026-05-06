@@ -94,11 +94,10 @@ export class ConversationsController {
   }
 
   @Post('start')
-  @Roles('barber')
   @HttpCode(200)
   @ApiOperation({
     summary:
-      'Barber-only: start (or return existing) conversation with a client. Clients cannot initiate.',
+      'Start (or return existing) conversation with the other party. Barbers pass a client id; clients pass a barber id.',
   })
   @ApiBody({ type: StartConversationDto })
   @ApiResponse({ status: 200, type: ConversationDetailResponseDto })
@@ -106,7 +105,11 @@ export class ConversationsController {
     @CurrentUser() user: SupabaseUserPayload,
     @Body() dto: StartConversationDto,
   ): Promise<ConversationDetailResponseDto> {
-    return this.conversationsService.startConversation(user.sub, dto.clientId);
+    return this.conversationsService.startConversation(
+      user.sub,
+      this.resolveRole(user),
+      dto.otherUserId,
+    );
   }
 
   private resolveRole(user: SupabaseUserPayload): 'barber' | 'client' {

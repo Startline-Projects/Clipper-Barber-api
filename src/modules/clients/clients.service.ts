@@ -354,15 +354,15 @@ export class ClientsService {
     photo: Express.Multer.File,
   ): Promise<string> {
     const ext = photo.mimetype.split('/')[1] ?? 'jpg';
-    const path = `${clientAuthId}/profile.${ext}`;
+    const path = `profiles/${clientAuthId}/profile.${ext}`;
 
     const { error } = await this.db.storage
-      .from('profile-photos')
+      .from('images')
       .upload(path, photo.buffer, { contentType: photo.mimetype, upsert: true });
 
     if (error) throw new InternalServerErrorException(messages.client.PROFILE_UPDATE_FAILED);
 
-    const { data } = this.db.storage.from('profile-photos').getPublicUrl(path);
+    const { data } = this.db.storage.from('images').getPublicUrl(path);
     return data.publicUrl;
   }
 
