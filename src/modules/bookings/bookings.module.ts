@@ -6,6 +6,7 @@ import { BookingCompletionService } from './booking-completion.service';
 import { BookingCompletionCron } from './booking-completion.cron';
 import {
   BarberRecurringBookingsController,
+  BarberRecurringSlotsController,
   ClientRecurringBookingsController,
   ClientRecurringSlotsController,
 } from './recurring/recurring.controller';
@@ -29,6 +30,7 @@ import { PaymentsModule } from '../payments/payments.module';
     ClientRecurringBookingsController,
     ClientRecurringSlotsController,
     BarberRecurringBookingsController,
+    BarberRecurringSlotsController,
     BarberRecurringArrangementsController,
     ClientRecurringArrangementsController,
   ],

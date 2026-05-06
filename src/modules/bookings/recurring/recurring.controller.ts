@@ -243,3 +243,25 @@ export class BarberRecurringBookingsController {
     return this.recurringService.cancelRecurringBooking(user.sub, 'barber', id);
   }
 }
+
+@ApiTags('Barber Recurring Bookings')
+@ApiBearerAuth()
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles('barber')
+@Controller('barber/recurring-slots')
+export class BarberRecurringSlotsController {
+  constructor(protected readonly recurringService: RecurringBookingsService) {}
+
+  @Get()
+  @ApiOperation({
+    summary:
+      'List recurring-eligible slot times for the authenticated barber on a given day-of-week, including availability against existing recurring and one-off bookings, plus allowed frequencies and the recurring price.',
+  })
+  @ApiResponse({ status: 200, type: RecurringSlotsResponseDto })
+  public async getRecurringSlots(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Query() query: GetRecurringSlotsQueryDto
+  ): Promise<RecurringSlotsResponseDto> {
+    return this.recurringService.getRecurringSlots(user.sub, query.serviceIds, query.dayOfWeek);
+  }
+}
