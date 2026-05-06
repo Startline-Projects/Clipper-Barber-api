@@ -1398,7 +1398,17 @@ export class RecurringBookingsService {
       .eq('barber_id', barberAuthId)
       .maybeSingle();
 
-    if (error) throw new InternalServerErrorException('Failed to fetch recurring booking');
+    if (error) {
+      console.error('[fetchRecurringForBarber] supabase error', {
+        recurringBookingId,
+        barberAuthId,
+        message: error.message,
+        details: error.details,
+        hint: error.hint,
+        code: error.code,
+      });
+      throw new InternalServerErrorException('Failed to fetch recurring booking');
+    }
     if (!data) throw new NotFoundException('Recurring booking not found');
     return data as RecurringRow;
   }
