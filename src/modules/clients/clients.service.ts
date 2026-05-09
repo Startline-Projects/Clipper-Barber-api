@@ -185,6 +185,7 @@ export class ClientsService {
   }
 
   public async getBarberDetail(
+    callerClientAuthId: string,
     barberId: string,
     query: GetBarberDetailQueryDto,
   ): Promise<BarberDetailResponseDto> {
@@ -202,10 +203,11 @@ export class ClientsService {
 
     const barber = barberData as BarberRow;
 
-    const [services, schedules, reviews] = await Promise.all([
+    const [services, schedules, reviews, hasActivePlan] = await Promise.all([
       this.fetchAllServicesForBarber(barberId),
       this.fetchSchedulesForBarber(barberId),
       this.fetchRecentReviews(barberId),
+      this.hasClientActivePlan(callerClientAuthId),
     ]);
 
     const reviewerIds = Array.from(new Set(reviews.map((r) => r.client_id)));
@@ -270,7 +272,22 @@ export class ClientsService {
         totalReviews: barber.total_reviews ?? 0,
       },
       distance: buildDistance(distanceKm),
+      hasActivePlan,
     };
+  }
+
+  // Whether the caller's clients.subscription_status is 'active'. Surfaces a
+  // single boolean to gate subscription-only flows on the client UI.
+  public async hasClientActivePlan(clientAuthId: string): Promise<boolean> {
+    const { data, error } = await this.db
+      .from('clients')
+      .select('subscription_status')
+      .eq('user_id', clientAuthId)
+      .maybeSingle();
+
+    if (error) throw new InternalServerErrorException('Failed to load subscription status');
+    if (!data) return false;
+    return (data.subscription_status as string | null) === 'active';
   }
 
   // ────────────────────────────────────────────────────────────

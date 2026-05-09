@@ -295,6 +295,22 @@ Read the current subscription state. Always reflects the latest webhook-mirrored
   }
   ```
 
+### 3.4a `GET /subscriptions/me/active-plan`
+
+Thin "is this client subscribed?" probe. Same source row as `GET /subscriptions/me` plus a flat `hasActivePlan` boolean so the UI can gate subscription-only flows in a single call.
+
+- **Auth:** required (client)
+- **Response 200** (`ActivePlanResponseDto`):
+  ```ts
+  {
+    hasActivePlan: boolean;                    // subscription_status === 'active'
+    plan: 'monthly' | 'yearly' | null;
+    status: 'inactive' | 'active' | 'past_due' | 'cancelled';
+    currentPeriodEnd: string | null;
+    cancelAtPeriodEnd: boolean;
+  }
+  ```
+
 ### 3.5 `PATCH /subscriptions/me/plan`
 
 Switch plan. **Only `monthly → yearly` is allowed.** Yearly → monthly downgrades are rejected with `409`.
@@ -450,6 +466,7 @@ Barber profile screen: bio, contact, working hours, services, last 7 reviews + s
     }];                              // most recent 7
     reviewsSummary: { averageRating: number; totalReviews: number };
     distance: { km: number; miles: number };
+    hasActivePlan: boolean;          // authenticated client's subscription_status === 'active'
   }
   ```
 
@@ -581,6 +598,7 @@ Paginated upcoming bookings. **Recurring subscriptions collapse to their next oc
       isRecurring: boolean;
     }];
     pagination: { currentPage, totalPages, totalBookings, limit, hasNextPage };
+    hasActivePlan: boolean;            // authenticated client's subscription_status === 'active'
   }
   ```
 
@@ -810,7 +828,7 @@ Detail with past + upcoming occurrences.
       cancelledAt: string | null,
       cancelledBy: 'client' | 'barber' | null,
       pastOccurrences: [{ bookingId, scheduledAt, status }],
-      upcomingOccurrences: [{ bookingId, scheduledAt, status }]   // capped at 8
+      upcomingOccurrences: [{ bookingId, scheduledAt, status }]   // all upcoming generated occurrences
     }
   }
   ```
@@ -1107,6 +1125,7 @@ Common application error codes (`code` field in the error envelope):
 | Profile | PATCH | `/client/profile` |
 | Subscriptions | POST | `/subscriptions` |
 | Subscriptions | GET | `/subscriptions/me` |
+| Subscriptions | GET | `/subscriptions/me/active-plan` |
 | Subscriptions | PATCH | `/subscriptions/me/plan` |
 | Subscriptions | DELETE | `/subscriptions/me` |
 | Subscriptions | POST | `/subscriptions/me/payment-method` |

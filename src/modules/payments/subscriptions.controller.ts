@@ -4,6 +4,7 @@ import { SubscriptionsService } from './subscriptions.service';
 import { CreateSubscriptionDto } from './dto/create-subscription.dto';
 import { SwitchPlanDto } from './dto/switch-plan.dto';
 import {
+  ActivePlanResponseDto,
   CancelSubscriptionResponseDto,
   CreateSubscriptionResponseDto,
   SubscriptionStateResponseDto,
@@ -45,6 +46,19 @@ export class SubscriptionsController {
     @CurrentUser() user: SupabaseUserPayload
   ): Promise<SubscriptionStateResponseDto> {
     return this.subscriptionsService.getSubscriptionState(user.sub);
+  }
+
+  @Get('me/active-plan')
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      "Return the authenticated client's active-plan flag plus a thin view of their current subscription. hasActivePlan is true iff subscription_status === 'active'.",
+  })
+  @ApiResponse({ status: 200, type: ActivePlanResponseDto })
+  public async getActivePlan(
+    @CurrentUser() user: SupabaseUserPayload
+  ): Promise<ActivePlanResponseDto> {
+    return this.subscriptionsService.getActivePlan(user.sub);
   }
 
   @Patch('me/plan')

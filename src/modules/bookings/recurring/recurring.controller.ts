@@ -20,6 +20,7 @@ import { RecurringBookingsService } from './recurring.service';
 import { GetRecurringSlotsQueryDto } from './dto/get-recurring-slots-query.dto';
 import { RecurringSlotsResponseDto } from './dto/recurring-slots-response.dto';
 import { CreateRecurringBookingDto } from './dto/create-recurring-booking.dto';
+import { CreateBarberRecurringBookingDto } from './dto/create-barber-recurring-booking.dto';
 import { DeclineRecurringBookingDto } from './dto/decline-recurring-booking.dto';
 import { PauseRecurringBookingDto } from './dto/pause-recurring-booking.dto';
 import { RecurringBookingResponseDto } from './dto/recurring-booking.dto';
@@ -65,7 +66,7 @@ export class ClientRecurringBookingsController {
   @Get(':id')
   @ApiOperation({
     summary:
-      "Get a client's recurring booking with past occurrences and up to the next 8 upcoming occurrences.",
+      "Get a client's recurring booking with past occurrences and all upcoming generated occurrences.",
   })
   @ApiResponse({ status: 200, type: RecurringBookingDetailResponseDto })
   public async getRecurringBooking(
@@ -170,10 +171,24 @@ export class BarberRecurringBookingsController {
     return this.recurringService.listRecurringBookingsForBarber(user.sub, query);
   }
 
+  @Post()
+  @ApiOperation({
+    summary:
+      "Barber creates a recurring booking on a client's behalf. Auto-accepted: status starts as 'active' and the 60-day window is generated synchronously.",
+  })
+  @ApiBody({ type: CreateBarberRecurringBookingDto })
+  @ApiResponse({ status: 201, type: RecurringBookingResponseDto })
+  public async createForClient(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Body() dto: CreateBarberRecurringBookingDto
+  ): Promise<RecurringBookingResponseDto> {
+    return this.recurringService.createRecurringByBarber(user.sub, dto);
+  }
+
   @Get(':id')
   @ApiOperation({
     summary:
-      'Get a recurring booking (barber view) with past occurrences and up to the next 8 upcoming occurrences.',
+      'Get a recurring booking (barber view) with past occurrences and all upcoming generated occurrences.',
   })
   @ApiResponse({ status: 200, type: RecurringBookingDetailResponseDto })
   public async getRecurringBooking(

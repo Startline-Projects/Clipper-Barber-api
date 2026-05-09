@@ -184,7 +184,10 @@ export class BookingsService {
     const startIndex = (page - 1) * limit;
     const pageIds = deduped.slice(startIndex, startIndex + limit).map((r) => r.id);
 
-    const bookings = await this.hydrateUpcomingBookings(pageIds);
+    const [bookings, hasActivePlan] = await Promise.all([
+      this.hydrateUpcomingBookings(pageIds),
+      this.fetchClientHasActivePlan(clientId),
+    ]);
 
     return {
       bookings,
@@ -195,7 +198,20 @@ export class BookingsService {
         limit,
         hasNextPage: page < totalPages,
       },
+      hasActivePlan,
     };
+  }
+
+  private async fetchClientHasActivePlan(clientId: string): Promise<boolean> {
+    const { data, error } = await this.db
+      .from('clients')
+      .select('subscription_status')
+      .eq('user_id', clientId)
+      .maybeSingle();
+
+    if (error) throw new InternalServerErrorException('Failed to load subscription status');
+    if (!data) return false;
+    return (data.subscription_status as string | null) === 'active';
   }
 
   public async listClientPastBookings(

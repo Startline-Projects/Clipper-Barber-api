@@ -10,6 +10,7 @@ import { StripeService } from './stripe.service';
 import { CreateSubscriptionDto, SubscriptionPlanDto } from './dto/create-subscription.dto';
 import { SwitchPlanDto } from './dto/switch-plan.dto';
 import {
+  ActivePlanResponseDto,
   CancelSubscriptionResponseDto,
   CreateSubscriptionResponseDto,
   SubscriptionStateResponseDto,
@@ -103,6 +104,17 @@ export class SubscriptionsService {
     return {
       status: client.subscription_status,
       plan: client.subscription_plan as SubscriptionPlanDto | null,
+      currentPeriodEnd: client.subscription_expires_at,
+      cancelAtPeriodEnd: client.subscription_cancel_at_period_end,
+    };
+  }
+
+  public async getActivePlan(authUserId: string): Promise<ActivePlanResponseDto> {
+    const client = await this.loadClient(authUserId);
+    return {
+      hasActivePlan: client.subscription_status === 'active',
+      plan: client.subscription_plan as SubscriptionPlanDto | null,
+      status: client.subscription_status,
       currentPeriodEnd: client.subscription_expires_at,
       cancelAtPeriodEnd: client.subscription_cancel_at_period_end,
     };

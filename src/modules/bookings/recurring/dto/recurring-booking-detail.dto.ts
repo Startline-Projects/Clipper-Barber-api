@@ -11,7 +11,10 @@ export class RecurringBookingDetailDto extends RecurringBookingDto {
   @ApiProperty({ type: [RecurringOccurrenceDto] })
   pastOccurrences: RecurringOccurrenceDto[];
 
-  @ApiProperty({ type: [RecurringOccurrenceDto], description: 'Hard cap of 8' })
+  @ApiProperty({
+    type: [RecurringOccurrenceDto],
+    description: 'All upcoming generated occurrences in the active window.',
+  })
   upcomingOccurrences: RecurringOccurrenceDto[];
 }
 

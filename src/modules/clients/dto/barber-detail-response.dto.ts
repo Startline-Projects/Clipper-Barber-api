@@ -54,4 +54,11 @@ export class BarberDetailResponseDto {
   @ApiProperty({ type: [BarberDetailReviewDto] }) reviews: BarberDetailReviewDto[];
   @ApiProperty({ type: BarberReviewsSummaryDto }) reviewsSummary: BarberReviewsSummaryDto;
   @ApiProperty({ type: BarberDistanceDto }) distance: BarberDistanceDto;
+
+  @ApiProperty({
+    example: false,
+    description:
+      "True when the authenticated client's clients.subscription_status === 'active'. Lets the client UI gate recurring/subscription-only flows without a separate call.",
+  })
+  hasActivePlan: boolean;
 }

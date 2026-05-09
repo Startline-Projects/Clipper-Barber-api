@@ -26,6 +26,7 @@ import {
   RecurringBookingStatus,
 } from './dto/recurring-booking.dto';
 import { BookingTypeDto } from '../dto/preview-booking.dto';
+import { CreateBarberRecurringBookingDto } from './dto/create-barber-recurring-booking.dto';
 import {
   RecurringBookingDetailResponseDto,
   RecurringOccurrenceDto,
@@ -441,30 +442,89 @@ export class RecurringBookingsService {
   ): Promise<RecurringBookingResponseDto> {
     // TODO: enforce client subscription_status === 'active' before allowing
     // a recurring request. Gated until subscription gating ships.
+    return this.createRecurringInternal({
+      clientAuthId,
+      barberId: dto.barberId,
+      services: dto.services,
+      dayOfWeek: dto.dayOfWeek,
+      slotTime: dto.slotTime,
+      frequency: dto.frequency,
+      autoAccept: false,
+    });
+  }
 
-    const barber = await this.fetchBarber(dto.barberId);
+  // Barber-initiated arrangement: same validation as the client path, but the
+  // barber is implicitly accepting the offer so we land it as `active` and
+  // generate the 60-day window immediately.
+  public async createRecurringByBarber(
+    barberAuthId: string,
+    dto: CreateBarberRecurringBookingDto,
+  ): Promise<RecurringBookingResponseDto> {
+    // Verify the chosen client exists. We never trust the barber's input.
+    const { data: clientRow, error: clientErr } = await this.db
+      .from('clients')
+      .select('user_id')
+      .eq('user_id', dto.clientId)
+      .maybeSingle();
+    if (clientErr) throw new InternalServerErrorException('Failed to fetch client');
+    if (!clientRow) throw new NotFoundException('Client not found');
+
+    return this.createRecurringInternal({
+      clientAuthId: dto.clientId,
+      barberId: barberAuthId,
+      services: dto.services,
+      dayOfWeek: dto.dayOfWeek,
+      slotTime: dto.slotTime,
+      frequency: dto.frequency,
+      autoAccept: true,
+    });
+  }
+
+  // Shared validation + insertion path for both client- and barber-initiated
+  // recurring booking creation. autoAccept=true skips the offer step and
+  // synchronously generates the 60-day window.
+  private async createRecurringInternal(args: {
+    clientAuthId: string;
+    barberId: string;
+    services: { barberServiceId: string; bookingType: BookingTypeDto | string }[];
+    dayOfWeek: number;
+    slotTime: string;
+    frequency: RecurringBookingFrequency | 'weekly' | 'biweekly';
+    autoAccept: boolean;
+  }): Promise<RecurringBookingResponseDto> {
+    const {
+      clientAuthId,
+      barberId,
+      services: selections,
+      dayOfWeek,
+      slotTime,
+      frequency,
+      autoAccept,
+    } = args;
+
+    const barber = await this.fetchBarber(barberId);
     if (!barber.recurring_enabled) {
       throw new BadRequestException('This barber is not accepting recurring bookings.');
     }
 
-    const requestedIds = dto.services.map((s) => s.barberServiceId);
+    const requestedIds = selections.map((s) => s.barberServiceId);
     if (new Set(requestedIds).size !== requestedIds.length) {
       throw new BadRequestException('Duplicate services are not allowed.');
     }
 
-    const services = await this.fetchServices(dto.barberId, requestedIds);
+    const services = await this.fetchServices(barberId, requestedIds);
     if (services.length !== requestedIds.length) {
       throw new NotFoundException('One or more services were not found or inactive for this barber');
     }
     // Services without an explicit recurring_price_usd are billed at their
     // regular_price_usd — same fallback rule as one-off bookings.
 
-    const schedule = await this.fetchSchedule(dto.barberId, dto.dayOfWeek);
+    const schedule = await this.fetchSchedule(barberId, dayOfWeek);
     if (!schedule || !schedule.recurring_enabled) {
       throw new BadRequestException('This day is not available for recurring bookings.');
     }
 
-    if (!this.isFrequencyAllowed(schedule.recurring_frequency, dto.frequency)) {
+    if (!this.isFrequencyAllowed(schedule.recurring_frequency, frequency)) {
       throw new BadRequestException('This frequency is not available for this day.');
     }
 
@@ -476,7 +536,7 @@ export class RecurringBookingsService {
     // Block size is slot-driven: services.length × schedule grid step.
     const slotStep = schedule.slot_duration_minutes;
     const totalDuration = services.length * slotStep;
-    const minutes = timeToMinutes(dto.slotTime);
+    const minutes = timeToMinutes(slotTime);
     const startM = timeToMinutes(window.start);
     const endM = timeToMinutes(window.end);
     if (minutes < startM || minutes + totalDuration > endM) {
@@ -495,7 +555,7 @@ export class RecurringBookingsService {
     // Extra charge is per-occurrence, not per-service. Distribute it onto the
     // first service's slot_type_surcharge_usd so the aggregate matches
     // `recurring_bookings.price_usd`.
-    const perServicePricing = dto.services.map((selection, idx) => {
+    const perServicePricing = selections.map((selection, idx) => {
       const svc = services.find((s) => s.id === selection.barberServiceId)!;
       const basePrice = this.recurringBasePrice(svc);
       const surcharge = idx === 0 ? extraCharge : 0;
@@ -513,22 +573,27 @@ export class RecurringBookingsService {
       perServicePricing.reduce((acc, p) => acc + p.totalPrice, 0).toFixed(2),
     );
 
-    const normalisedSlotTime = `${dto.slotTime}:00`;
-    const primary = services.find((s) => s.id === dto.services[0].barberServiceId)!;
+    const normalisedSlotTime = `${slotTime}:00`;
+    const primary = services.find((s) => s.id === selections[0].barberServiceId)!;
+
+    const nowIso = new Date().toISOString();
+    const initialStatus = autoAccept ? 'active' : 'pending_barber_approval';
+    const today = autoAccept ? localDateInTz(new Date(), barber.timezone) : null;
 
     const { data: inserted, error } = await this.db
       .from('recurring_bookings')
       .insert({
         client_id: clientAuthId,
-        barber_id: dto.barberId,
+        barber_id: barberId,
         barber_service_id: primary.id,
-        day_of_week: dto.dayOfWeek,
+        day_of_week: dayOfWeek,
         slot_time: normalisedSlotTime,
-        frequency: dto.frequency,
+        frequency,
         price_usd: priceUsd,
         duration_minutes: totalDuration,
-        status: 'pending_barber_approval',
+        status: initialStatus,
         is_renewal: false,
+        ...(autoAccept ? { barber_accepted_at: nowIso, window_start_date: today } : {}),
       })
       .select('*')
       .single();
@@ -566,13 +631,43 @@ export class RecurringBookingsService {
       throw new InternalServerErrorException('Failed to create recurring booking services');
     }
 
-    void this.notificationsService.createAndSendNotification({
-      recipientId: insertedRow.barber_id,
-      recipientType: 'barber',
-      senderId: clientAuthId,
-      type: NotificationTypeDto.NEW_RECURRING_REQUEST,
-      recurringBookingId: insertedRow.id,
-    });
+    if (autoAccept) {
+      try {
+        await this.generator.generate(insertedRow.id);
+      } catch (genErr) {
+        // Roll the row back to pending so we don't leave an `active` row with
+        // zero generated occurrences (consistent with acceptRecurringBooking).
+        await this.db
+          .from('recurring_bookings')
+          .update({
+            status: 'pending_barber_approval',
+            barber_accepted_at: null,
+            window_start_date: null,
+          })
+          .eq('id', insertedRow.id);
+        throw new InternalServerErrorException(
+          `Failed to generate recurring occurrences after auto-accept: ${
+            genErr instanceof Error ? genErr.message : 'unknown error'
+          }`,
+        );
+      }
+      // Notify the client that their recurring is live.
+      void this.notificationsService.createAndSendNotification({
+        recipientId: insertedRow.client_id,
+        recipientType: 'client',
+        senderId: barberId,
+        type: NotificationTypeDto.RECURRING_ACCEPTED,
+        recurringBookingId: insertedRow.id,
+      });
+    } else {
+      void this.notificationsService.createAndSendNotification({
+        recipientId: insertedRow.barber_id,
+        recipientType: 'barber',
+        senderId: clientAuthId,
+        type: NotificationTypeDto.NEW_RECURRING_REQUEST,
+        recurringBookingId: insertedRow.id,
+      });
+    }
 
     return { recurringBooking: await this.buildRecurringBookingDto(insertedRow) };
   }
@@ -610,7 +705,25 @@ export class RecurringBookingsService {
       throw new InternalServerErrorException('Failed to accept recurring booking');
     }
 
-    await this.generator.generate(recurringBookingId);
+    try {
+      await this.generator.generate(recurringBookingId);
+    } catch (genErr) {
+      // Roll the row back to pending so a hard-failed generate never leaves
+      // an `active` arrangement with zero occupancy.
+      await this.db
+        .from('recurring_bookings')
+        .update({
+          status: 'pending_barber_approval',
+          barber_accepted_at: null,
+          window_start_date: null,
+        })
+        .eq('id', recurringBookingId);
+      throw new InternalServerErrorException(
+        `Failed to generate recurring occurrences after acceptance: ${
+          genErr instanceof Error ? genErr.message : 'unknown error'
+        }`,
+      );
+    }
 
     const updatedRow = updated as RecurringRow;
     void this.notificationsService.createAndSendNotification({
@@ -1214,6 +1327,11 @@ export class RecurringBookingsService {
       throw new BadRequestException('Only paused recurring bookings can be resumed.');
     }
 
+    // Capture the pause window BEFORE clearing it — restore relies on it to
+    // identify which cancelled rows belong to this pause.
+    const pauseStart = row.pause_start_date;
+    const pauseEnd = row.pause_end_date;
+
     const { data: updated, error } = await this.db
       .from('recurring_bookings')
       .update({
@@ -1229,8 +1347,30 @@ export class RecurringBookingsService {
 
     if (error || !updated) throw new InternalServerErrorException('Failed to resume recurring booking');
 
-    // Refill any missing dates in the remaining window
+    // 1) Restore previously-cancelled occurrences inside the pause window
+    //    where the slot is still free. Conflicting slots are left cancelled.
+    let restored = 0;
+    let conflicted = 0;
+    if (pauseStart) {
+      const summary = await this.generator.restorePausedOccurrences(
+        recurringBookingId,
+        pauseStart,
+        pauseEnd,
+      );
+      restored = summary.restored;
+      conflicted = summary.conflicted;
+    }
+
+    // 2) Top up with any new dates that rolled into the rolling 60-day window
+    //    while the recurring was paused. generate() skips dates that already
+    //    have a row, so it composes safely with restore.
     await this.generator.generate(recurringBookingId);
+
+    // Observability for the orchestrator step.
+    // eslint-disable-next-line no-console
+    console.log(
+      `[recurring.resume] id=${recurringBookingId} restored=${restored} conflicted=${conflicted}`,
+    );
 
     return { recurringBooking: await this.buildRecurringBookingDto(updated as RecurringRow) };
   }
@@ -1359,8 +1499,7 @@ export class RecurringBookingsService {
           .select('id, scheduled_at, status')
           .eq('recurring_booking_id', recurringBookingId)
           .gte('scheduled_at', nowIso)
-          .order('scheduled_at', { ascending: true })
-          .limit(8),
+          .order('scheduled_at', { ascending: true }),
       ]);
 
     if (pastError || upError) {

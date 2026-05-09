@@ -22,4 +22,11 @@ export class ClientUpcomingBookingsResponseDto {
 
   @ApiProperty({ type: BookingsPageMetaDto })
   pagination: BookingsPageMetaDto;
+
+  @ApiProperty({
+    example: false,
+    description:
+      "True when the authenticated client's clients.subscription_status === 'active'.",
+  })
+  hasActivePlan: boolean;
 }

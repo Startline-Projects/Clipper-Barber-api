@@ -41,6 +41,30 @@ export class SubscriptionStateResponseDto {
   cancelAtPeriodEnd: boolean;
 }
 
+export class ActivePlanResponseDto {
+  @ApiProperty({
+    example: true,
+    description: 'True when clients.subscription_status === "active".',
+  })
+  hasActivePlan: boolean;
+
+  @ApiProperty({ enum: SubscriptionPlanDto, nullable: true })
+  plan: SubscriptionPlanDto | null;
+
+  @ApiProperty({ example: 'active' })
+  status: SubscriptionStatusDto;
+
+  @ApiProperty({
+    example: '2026-05-27T00:00:00.000Z',
+    nullable: true,
+    description: 'Mirrors clients.subscription_expires_at.',
+  })
+  currentPeriodEnd: string | null;
+
+  @ApiProperty({ example: false })
+  cancelAtPeriodEnd: boolean;
+}
+
 export class CancelSubscriptionResponseDto {
   @ApiProperty({ example: 'active' })
   status: SubscriptionStatusDto;

@@ -154,72 +154,99 @@ export class RecurringBookingGeneratorService {
       serviceSnapshots.reduce((acc, s) => acc + Number(s.slot_type_surcharge_usd), 0).toFixed(2),
     );
 
+    let succeeded = 0;
+    let conflictSkipped = 0;
+    let otherErrorSkipped = 0;
+
     for (const date of targetDates) {
-      const scheduledAt = composeUtcFromLocal(date, slotTime, barber.timezone);
-      const scheduledIso = scheduledAt.toISOString();
-      if (existing.has(scheduledIso)) continue;
+      try {
+        const scheduledAt = composeUtcFromLocal(date, slotTime, barber.timezone);
+        const scheduledIso = scheduledAt.toISOString();
+        if (existing.has(scheduledIso)) {
+          continue;
+        }
 
-      const nowIso = new Date().toISOString();
-      const { data: inserted, error } = await this.db
-        .from('bookings')
-        .insert({
-          barber_id: recurring.barber_id,
-          client_id: recurring.client_id,
-          barber_service_id: primary.barber_service_id,
-          recurring_booking_id: recurringBookingId,
-          service_type: primary.service_type,
-          booking_type: primary.booking_type,
-          scheduled_at: scheduledIso,
-          duration_minutes: totalDuration,
-          base_price_usd: totalBase,
-          slot_type_surcharge_usd: totalSurcharge,
-          price_usd: totalPrice,
-          status: 'confirmed',
-          confirmed_at: nowIso,
-        })
-        .select('id')
-        .single();
+        const nowIso = new Date().toISOString();
+        const { data: inserted, error } = await this.db
+          .from('bookings')
+          .insert({
+            barber_id: recurring.barber_id,
+            client_id: recurring.client_id,
+            barber_service_id: primary.barber_service_id,
+            recurring_booking_id: recurringBookingId,
+            service_type: primary.service_type,
+            booking_type: primary.booking_type,
+            scheduled_at: scheduledIso,
+            duration_minutes: totalDuration,
+            base_price_usd: totalBase,
+            slot_type_surcharge_usd: totalSurcharge,
+            price_usd: totalPrice,
+            status: 'confirmed',
+            confirmed_at: nowIso,
+          })
+          .select('id')
+          .single();
 
-      // 23505 / 23P01 = another booking already holds an overlapping slot.
-      // Skip per agreed generator policy; the client keeps their other
-      // occurrences.
-      if (error && error.code !== '23505' && error.code !== '23P01') {
-        throw new InternalServerErrorException(
-          `Failed to generate recurring booking occurrence: ${error.message}`,
+        // 23505 / 23P01 = another booking already holds an overlapping slot.
+        // Skip per agreed generator policy; the client keeps their other
+        // occurrences.
+        if (error && error.code !== '23505' && error.code !== '23P01') {
+          this.logger.error(
+            `Generator failed at ${scheduledIso} for recurring_booking ${recurringBookingId}: ${error.message}`,
+          );
+          otherErrorSkipped++;
+          continue;
+        }
+        if (error) {
+          this.logger.warn(
+            `Generator skipped ${scheduledIso} for recurring_booking ${recurringBookingId} — slot held by another booking`,
+          );
+          conflictSkipped++;
+          continue;
+        }
+
+        const bookingId = (inserted as { id: string }).id;
+        const childRows = serviceSnapshots.map((s) => ({
+          booking_id: bookingId,
+          barber_service_id: s.barber_service_id,
+          service_type: s.service_type,
+          booking_type: s.booking_type,
+          duration_minutes: s.duration_minutes,
+          base_price_usd: s.base_price_usd,
+          slot_type_surcharge_usd: s.slot_type_surcharge_usd,
+          price_usd: s.price_usd,
+          sort_order: s.sort_order,
+        }));
+
+        const { error: childError } = await this.db
+          .from('booking_services')
+          .insert(childRows);
+
+        if (childError) {
+          // Undo the just-inserted booking so the row doesn't sit without children.
+          await this.db.from('bookings').delete().eq('id', bookingId);
+          this.logger.error(
+            `Generator child-fan-out failed at ${scheduledIso} for recurring_booking ${recurringBookingId}: ${childError.message}`,
+          );
+          otherErrorSkipped++;
+          continue;
+        }
+
+        succeeded++;
+      } catch (iterErr) {
+        // Defensive — never let a single bad iteration kill the whole batch.
+        this.logger.error(
+          `Generator iteration threw for recurring_booking ${recurringBookingId} on ${date}: ${
+            iterErr instanceof Error ? iterErr.message : 'unknown error'
+          }`,
         );
-      }
-      if (error) {
-        this.logger.warn(
-          `Generator skipped ${scheduledIso} for recurring_booking ${recurringBookingId} — slot held by another booking`,
-        );
-        continue;
-      }
-
-      const bookingId = (inserted as { id: string }).id;
-      const childRows = serviceSnapshots.map((s) => ({
-        booking_id: bookingId,
-        barber_service_id: s.barber_service_id,
-        service_type: s.service_type,
-        booking_type: s.booking_type,
-        duration_minutes: s.duration_minutes,
-        base_price_usd: s.base_price_usd,
-        slot_type_surcharge_usd: s.slot_type_surcharge_usd,
-        price_usd: s.price_usd,
-        sort_order: s.sort_order,
-      }));
-
-      const { error: childError } = await this.db
-        .from('booking_services')
-        .insert(childRows);
-
-      if (childError) {
-        // Undo the just-inserted booking so the row doesn't sit without children.
-        await this.db.from('bookings').delete().eq('id', bookingId);
-        throw new InternalServerErrorException(
-          `Failed to fan out booking services: ${childError.message}`,
-        );
+        otherErrorSkipped++;
       }
     }
+
+    this.logger.log(
+      `Generator summary for recurring_booking ${recurringBookingId}: target=${targetDates.length} succeeded=${succeeded} conflictSkipped=${conflictSkipped} otherErrorSkipped=${otherErrorSkipped}`,
+    );
 
     void this.conversationsService.markHasBookingIfConversationExists(
       recurring.barber_id,
@@ -288,6 +315,142 @@ export class RecurringBookingGeneratorService {
     if (updateError) {
       throw new InternalServerErrorException('Failed to cancel bookings for pause');
     }
+  }
+
+  // Restores occurrences that were cancelled by a pause. For each cancelled
+  // booking on this recurring inside [pauseStart, pauseEnd], if the slot is
+  // free now, insert a fresh confirmed booking row at the same scheduled_at
+  // with the same service snapshot. Conflicting rows are left as-is — the
+  // historical cancelled row is preserved either way for audit.
+  public async restorePausedOccurrences(
+    recurringBookingId: string,
+    pauseStart: string,
+    pauseEnd: string | null,
+  ): Promise<{ restored: number; conflicted: number }> {
+    const recurring = await this.fetchRecurring(recurringBookingId);
+    if (!recurring) return { restored: 0, conflicted: 0 };
+
+    const barber = await this.fetchBarber(recurring.barber_id);
+    if (!barber) return { restored: 0, conflicted: 0 };
+
+    const serviceSnapshots = await this.fetchServiceSnapshots(recurringBookingId);
+    if (serviceSnapshots.length === 0) return { restored: 0, conflicted: 0 };
+
+    const totalDuration =
+      recurring.duration_minutes ??
+      serviceSnapshots.reduce((acc, s) => acc + s.duration_minutes, 0);
+    const primary = serviceSnapshots[0];
+    const totalPrice = Number(recurring.price_usd);
+    const totalBase = Number(
+      serviceSnapshots.reduce((acc, s) => acc + Number(s.base_price_usd), 0).toFixed(2),
+    );
+    const totalSurcharge = Number(
+      serviceSnapshots.reduce((acc, s) => acc + Number(s.slot_type_surcharge_usd), 0).toFixed(2),
+    );
+
+    // Pull every cancelled occurrence on this recurring whose local date sits
+    // inside the pause window. We use the barber's timezone for date math so
+    // the bounds match what `cancelPausedBookings` originally cancelled.
+    const { data, error } = await this.db
+      .from('bookings')
+      .select('id, scheduled_at, cancelled_at')
+      .eq('recurring_booking_id', recurringBookingId)
+      .eq('status', 'cancelled')
+      .not('cancelled_at', 'is', null);
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to load cancelled occurrences for restore');
+    }
+
+    const candidates: { scheduledIso: string }[] = [];
+    for (const row of data ?? []) {
+      const scheduledIso = row.scheduled_at as string;
+      const localDate = localDateInTz(new Date(scheduledIso), barber.timezone);
+      if (localDate < pauseStart) continue;
+      if (pauseEnd && localDate > pauseEnd) continue;
+      candidates.push({ scheduledIso });
+    }
+
+    if (candidates.length === 0) return { restored: 0, conflicted: 0 };
+
+    const nowMs = Date.now();
+    let restored = 0;
+    let conflicted = 0;
+
+    for (const cand of candidates) {
+      // Skip past dates — never restore a booking that's already happened.
+      if (new Date(cand.scheduledIso).getTime() < nowMs) continue;
+
+      // Insert a fresh confirmed row. The `bookings` table's exclusion /
+      // unique constraints will reject the insert if the slot is now held
+      // by another booking — we treat 23505 / 23P01 as "conflicted".
+      const nowIso = new Date().toISOString();
+      const { data: inserted, error: insErr } = await this.db
+        .from('bookings')
+        .insert({
+          barber_id: recurring.barber_id,
+          client_id: recurring.client_id,
+          barber_service_id: primary.barber_service_id,
+          recurring_booking_id: recurringBookingId,
+          service_type: primary.service_type,
+          booking_type: primary.booking_type,
+          scheduled_at: cand.scheduledIso,
+          duration_minutes: totalDuration,
+          base_price_usd: totalBase,
+          slot_type_surcharge_usd: totalSurcharge,
+          price_usd: totalPrice,
+          status: 'confirmed',
+          confirmed_at: nowIso,
+        })
+        .select('id')
+        .single();
+
+      if (insErr) {
+        if (insErr.code === '23505' || insErr.code === '23P01') {
+          conflicted++;
+          continue;
+        }
+        this.logger.error(
+          `restorePausedOccurrences failed at ${cand.scheduledIso} for recurring_booking ${recurringBookingId}: ${insErr.message}`,
+        );
+        conflicted++;
+        continue;
+      }
+
+      const bookingId = (inserted as { id: string }).id;
+      const childRows = serviceSnapshots.map((s) => ({
+        booking_id: bookingId,
+        barber_service_id: s.barber_service_id,
+        service_type: s.service_type,
+        booking_type: s.booking_type,
+        duration_minutes: s.duration_minutes,
+        base_price_usd: s.base_price_usd,
+        slot_type_surcharge_usd: s.slot_type_surcharge_usd,
+        price_usd: s.price_usd,
+        sort_order: s.sort_order,
+      }));
+
+      const { error: childError } = await this.db
+        .from('booking_services')
+        .insert(childRows);
+
+      if (childError) {
+        await this.db.from('bookings').delete().eq('id', bookingId);
+        this.logger.error(
+          `restorePausedOccurrences child-fan-out failed at ${cand.scheduledIso}: ${childError.message}`,
+        );
+        conflicted++;
+        continue;
+      }
+
+      restored++;
+    }
+
+    this.logger.log(
+      `Restore summary for recurring_booking ${recurringBookingId}: candidates=${candidates.length} restored=${restored} conflicted=${conflicted}`,
+    );
+
+    return { restored, conflicted };
   }
 
   // Same as cancelPausedBookings but with no date filter — used by R9 cancel.

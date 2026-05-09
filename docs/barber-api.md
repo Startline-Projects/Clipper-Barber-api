@@ -661,7 +661,7 @@ Cursor-paginated list. Pending offers appear here with `status = 'pending_barber
       services: [{ id, name, durationMinutes, bookingType, startOffsetMinutes, priceUsd }],
       totalDurationMinutes: number,
       pastOccurrences: [{ bookingId, scheduledAt, status }],
-      upcomingOccurrences: [{ bookingId, scheduledAt, status }],   // capped at 8
+      upcomingOccurrences: [{ bookingId, scheduledAt, status }],   // all upcoming generated occurrences
       windowStartDate: string | null,
       pauseStartDate: string | null,
       pauseEndDate: string | null,
@@ -715,6 +715,59 @@ Cancels the subscription. Future generated bookings are cancelled; past/complete
 - **Auth:** required (barber)
 - **Body:** none
 - **Response 200:** `{ recurringBooking }` (status `cancelled`, `cancelledBy: 'barber'`).
+
+### 7.8 Create on behalf of client (barber-initiated recurring)
+
+A barber can set up a recurring arrangement for a client directly. The flow mirrors the client-initiated path but skips the offer step — the row is auto-accepted (`status: 'active'`) and the 60-day window of `confirmed` booking rows is generated synchronously.
+
+#### 7.8.1 `GET /barber/recurring-slots`
+
+Recurring-eligible slots for the authenticated barber on a given day-of-week, including availability against existing recurring + one-off bookings.
+
+- **Auth:** required (barber)
+- **Query** (`GetRecurringSlotsQueryDto`):
+  | Param | Type | Required | Notes |
+  |---|---|---|---|
+  | `serviceIds` | uuid[] | yes | 1..4 service ids; comma-separated or repeated |
+  | `dayOfWeek` | int 0..6 | yes | 0 = Sunday |
+- **Response 200** (`RecurringSlotsResponseDto`):
+  ```ts
+  {
+    dayOfWeek: 0..6,
+    recurringAvailable: boolean,                 // false → day not configured for recurring
+    recurringFrequencyOptions: ('weekly' | 'biweekly')[],
+    recurringPriceUsd: number | null,
+    totalDurationMinutes: number,
+    slots: [{ time: 'HH:mm', available: boolean }]
+  }
+  ```
+
+#### 7.8.2 `POST /barber/recurring-bookings`
+
+Create a recurring arrangement for a chosen client. The barber implicitly accepts the offer; the row lands as `active` and the generator runs immediately.
+
+- **Auth:** required (barber)
+- **Body** (`CreateBarberRecurringBookingDto`):
+  ```ts
+  {
+    clientId: string;                            // uuid; must exist in clients
+    services: [{ barberServiceId: string; bookingType: 'regular' | 'day_off' }];   // 1..4
+    dayOfWeek: 0..6;
+    slotTime: 'HH:mm';
+    frequency: 'weekly' | 'biweekly';
+  }
+  ```
+- **Response 201** (`RecurringBookingResponseDto`): `{ recurringBooking: RecurringBookingDto }` with `status: 'active'`, `barberAcceptedAt` set, `windowStartDate` set to today (barber's local timezone).
+- Errors:
+  - `400 This barber is not accepting recurring bookings.`
+  - `400 This day is not available for recurring bookings.` / `400 This frequency is not available for this day.`
+  - `400 The selected services do not fit the bookable window for this day.`
+  - `400 slotTime does not align to the day's slot grid.`
+  - `404 Client not found` / `404 One or more services were not found or inactive for this barber`
+  - `409 This recurring slot is already taken.`
+  - `500 Failed to generate recurring occurrences after auto-accept: …` — generator failed; the recurring row is rolled back to `pending_barber_approval` so it can be re-attempted.
+
+> Same validation as `POST /client/recurring-bookings`: services must belong to the barber and be active, the day must have `recurring_enabled`, the chosen `frequency` must match the day's allowed options, and the block (`services.length × slot_duration_minutes`) must fit inside the day's bookable window aligned to the slot grid.
 
 ---
 
@@ -1232,6 +1285,8 @@ The mobile app should treat `401` as a signal to call `POST /auth/refresh` once 
 | Bookings | PATCH | `/barber/bookings/:id/complete` |
 | Bookings | PATCH | `/barber/bookings/:id/no-show` |
 | Recurring | GET | `/barber/recurring-bookings` |
+| Recurring | POST | `/barber/recurring-bookings` |
+| Recurring | GET | `/barber/recurring-slots` |
 | Recurring | GET | `/barber/recurring-bookings/:id` |
 | Recurring | PATCH | `/barber/recurring-bookings/:id/accept` |
 | Recurring | PATCH | `/barber/recurring-bookings/:id/decline` |
