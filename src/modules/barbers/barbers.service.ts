@@ -18,7 +18,7 @@ import {
   BARBER_DEFAULT_TIMEZONE,
   projectBookingTime,
 } from '../bookings/util/timezone.util';
-import { NoShowService } from '../payments/no-show.service';
+import { NoShowsService } from '../no-shows/no-shows.service';
 import { ConnectService } from '../payments/connect.service';
 import { ConnectRequired } from '../payments/payments.exceptions';
 import { UpdateBarberProfileDto } from './dto/update-barber-profile.dto';
@@ -129,7 +129,7 @@ export class BarbersService {
     private readonly supabaseService: SupabaseService,
     private readonly completionService: BookingCompletionService,
     private readonly notificationsService: NotificationsService,
-    private readonly noShowService: NoShowService,
+    private readonly noShowsService: NoShowsService,
     private readonly connectService: ConnectService
   ) {}
 
@@ -501,18 +501,27 @@ export class BarbersService {
       throw new InternalServerErrorException('Failed to mark booking as no-show');
     }
 
-    // Booking transition is final. The Stripe charge runs as a separate
-    // best-effort step — failures are surfaced in chargeResult, never roll
-    // back the no_show status.
-    let chargeResult = null;
+    // Booking transition is final. Record the unresolved no-show row so
+    // the client can pay it later — payment is no longer initiated here.
+    // Failures of the record step never roll back the no_show status.
+    let noShowId: string | null = null;
+    let amountUsd: number | null = null;
     try {
-      chargeResult = await this.noShowService.charge({
-        bookingId: updated.id as string,
-        barberAuthId: barberId,
-        clientAuthId: updated.client_id as string,
-      });
+      const barberRow = await this.loadBarberNoShowConfig(barberId);
+      const amount = Number(barberRow?.no_show_charge_amount_usd ?? 0);
+      if (barberRow?.no_show_charge_enabled && amount > 0) {
+        const row = await this.noShowsService.recordUnresolved({
+          bookingId: updated.id as string,
+          barberAuthId: barberId,
+          clientAuthId: updated.client_id as string,
+          amountUsd: amount,
+          reason: null,
+        });
+        noShowId = row.id;
+        amountUsd = row.amountUsd;
+      }
     } catch (err) {
-      console.error('No-show charge step failed for booking', updated.id, err);
+      console.error('Failed to record no-show row for booking', updated.id, err);
     }
 
     return {
@@ -520,8 +529,24 @@ export class BarbersService {
         id: updated.id as string,
         status: updated.status as string,
       },
-      chargeResult,
+      chargeResult: {
+        charged: false,
+        amountUsd,
+        noShowChargeId: noShowId,
+        reason: noShowId ? null : 'disabled',
+      },
     };
+  }
+
+  private async loadBarberNoShowConfig(
+    barberAuthId: string
+  ): Promise<{ no_show_charge_enabled: boolean; no_show_charge_amount_usd: number | string | null } | null> {
+    const { data } = await this.db
+      .from('barbers')
+      .select('no_show_charge_enabled, no_show_charge_amount_usd')
+      .eq('user_id', barberAuthId)
+      .maybeSingle();
+    return (data as { no_show_charge_enabled: boolean; no_show_charge_amount_usd: number | string | null } | null) ?? null;
   }
 
   // ────────────────────────────────────────────────────────────

@@ -242,6 +242,17 @@ export class WebhooksService {
     pi: Stripe.PaymentIntent,
     outcome: 'succeeded' | 'failed'
   ): Promise<void> {
+    // New client-initiated no-show resolution flow. Settles the no_shows
+    // row keyed by metadata.no_show_id. The row is the source of truth;
+    // bookings.no_show_charged is mirrored below for backwards compat.
+    if (pi.metadata?.kind === 'no_show_resolution') {
+      await this.settleNoShowResolution(pi, outcome);
+      return;
+    }
+
+    // Legacy auto-charge audit table — left in place so previously-fired
+    // webhooks still update their original audit row. New no-shows do not
+    // write to no_show_charges.
     if (pi.metadata?.kind !== 'no_show') return;
 
     const status = outcome === 'succeeded' ? 'succeeded' : 'failed';
@@ -266,6 +277,65 @@ export class WebhooksService {
         .eq('id', pi.metadata.booking_id);
       if (bookingErr) {
         this.logger.error(`Failed to flip booking flag for ${pi.metadata.booking_id}`, bookingErr);
+      }
+    }
+  }
+
+  private async settleNoShowResolution(
+    pi: Stripe.PaymentIntent,
+    outcome: 'succeeded' | 'failed'
+  ): Promise<void> {
+    const noShowId = pi.metadata?.no_show_id;
+    if (!noShowId) return;
+
+    if (outcome === 'succeeded') {
+      const latest = pi.latest_charge;
+      const transferId =
+        typeof latest === 'object' && latest !== null
+          ? ((latest.transfer as string | null | undefined) ?? null)
+          : null;
+
+      const { error } = await this.db
+        .from('no_shows')
+        .update({
+          status: 'paid',
+          resolved_at: new Date().toISOString(),
+          stripe_payment_intent_id: pi.id,
+          stripe_transfer_id: transferId,
+          payment_metadata: { amount_received: pi.amount_received ?? pi.amount },
+        })
+        .eq('id', noShowId)
+        .in('status', ['unresolved', 'pending_payment', 'failed']);
+      if (error) {
+        throw new Error(`Failed to mark no-show ${noShowId} paid: ${error.message}`);
+      }
+
+      // Mirror booking flag for legacy consumers. Best-effort: a failure
+      // here doesn't unwind the no_shows row.
+      const bookingId = pi.metadata?.booking_id;
+      if (bookingId) {
+        const amountUsd = (pi.amount_received ?? pi.amount) / 100;
+        const { error: bErr } = await this.db
+          .from('bookings')
+          .update({ no_show_charged: true, no_show_charge_amount_usd: amountUsd })
+          .eq('id', bookingId);
+        if (bErr) {
+          this.logger.error(`Failed to mirror booking flag for ${bookingId}`, bErr);
+        }
+      }
+    } else {
+      const failureReason = pi.last_payment_error?.message ?? null;
+      const { error } = await this.db
+        .from('no_shows')
+        .update({
+          status: 'failed',
+          stripe_payment_intent_id: pi.id,
+          payment_metadata: { last_failure: failureReason },
+        })
+        .eq('id', noShowId)
+        .in('status', ['pending_payment', 'unresolved']);
+      if (error) {
+        throw new Error(`Failed to mark no-show ${noShowId} failed: ${error.message}`);
       }
     }
   }

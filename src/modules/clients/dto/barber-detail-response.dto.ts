@@ -61,4 +61,18 @@ export class BarberDetailResponseDto {
       "True when the authenticated client's clients.subscription_status === 'active'. Lets the client UI gate recurring/subscription-only flows without a separate call.",
   })
   hasActivePlan: boolean;
+
+  @ApiProperty({
+    example: 0,
+    description:
+      'Number of unresolved (or failed) no-shows the authenticated client currently owes across all barbers.',
+  })
+  unresolvedNoShowsCount: number;
+
+  @ApiProperty({
+    example: false,
+    description:
+      'Soft-warning flag — true when unresolvedNoShowsCount >= 3. Booking is NOT blocked server-side; the frontend may surface a banner / require resolution.',
+  })
+  hasBlockedNoShows: boolean;
 }
