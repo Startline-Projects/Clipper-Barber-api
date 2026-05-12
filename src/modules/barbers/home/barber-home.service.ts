@@ -5,11 +5,19 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../../supabase/supabase.service';
 import { BookingStatusDto } from '../dto/list-barber-bookings-query.dto';
+import { BookingTypeDto } from '../../bookings/dto/preview-booking.dto';
 import {
+  BarberHomeBookingServiceItemDto,
   BarberHomePendingItemDto,
   BarberHomeResponseDto,
   BarberHomeScheduleItemDto,
 } from './dto/barber-home-response.dto';
+import {
+  BARBER_DEFAULT_TIMEZONE,
+  isValidTimezone,
+  localDateInTz,
+  projectBookingTime,
+} from '../../bookings/util/timezone.util';
 
 interface RpcClient {
   id: string;
@@ -23,10 +31,18 @@ interface RpcService {
   durationMinutes?: number;
 }
 
+interface RpcBookingServiceItem {
+  id: string;
+  name: string;
+  durationMinutes: number | string;
+  bookingType: string;
+}
+
 interface RpcPendingItem {
   bookingId: string;
   client: RpcClient;
   service: RpcService | null;
+  services?: RpcBookingServiceItem[] | null;
   scheduledAt: string;
   priceUsd: number | string;
   status: string;
@@ -37,6 +53,8 @@ interface RpcScheduleItem {
   bookingId: string;
   client: RpcClient;
   service: (RpcService & { durationMinutes: number }) | null;
+  services?: RpcBookingServiceItem[] | null;
+  totalDurationMinutes?: number | string | null;
   scheduledAt: string;
   endAt: string;
   minutesUntilStart: number;
@@ -89,7 +107,7 @@ export class BarberHomeService {
       // Empty-state shape — never null lists.
       return {
         today: {
-          date: this.localDateInTz(new Date(), tz),
+          date: localDateInTz(new Date(), tz),
           timezone: tz,
           totalAppointments: 0,
           completedCount: 0,
@@ -119,11 +137,15 @@ export class BarberHomeService {
       },
       pendingApproval: {
         totalCount: Number(result.pendingApproval.totalCount ?? 0),
-        items: (result.pendingApproval.items ?? []).map(this.shapePendingItem),
+        items: (result.pendingApproval.items ?? []).map((it) =>
+          BarberHomeService.shapePendingItem(it, tz),
+        ),
       },
       schedule: {
         totalUpcomingToday: Number(result.schedule.totalUpcomingToday ?? 0),
-        items: (result.schedule.items ?? []).map(this.shapeScheduleItem),
+        items: (result.schedule.items ?? []).map((it) =>
+          BarberHomeService.shapeScheduleItem(it, tz),
+        ),
       },
       allowAutoConfirm: settings.allowAutoConfirm,
       autoConfirmToday: settings.autoConfirmToday,
@@ -135,7 +157,8 @@ export class BarberHomeService {
     };
   }
 
-  private shapePendingItem(item: RpcPendingItem): BarberHomePendingItemDto {
+  private static shapePendingItem(item: RpcPendingItem, tz: string): BarberHomePendingItemDto {
+    const time = projectBookingTime(item.scheduledAt, tz);
     return {
       bookingId: item.bookingId,
       client: {
@@ -146,14 +169,20 @@ export class BarberHomeService {
       service: item.service
         ? { id: item.service.id, name: item.service.name }
         : null,
-      scheduledAt: new Date(item.scheduledAt).toISOString(),
+      services: BarberHomeService.shapeBookingServices(item.services),
+      scheduledAt: time.scheduledAt,
+      timezone: time.timezone,
+      appointmentDate: time.appointmentDate,
+      appointmentTime: time.appointmentTime,
       priceUsd: Number(item.priceUsd ?? 0),
       status: item.status as BookingStatusDto,
       requestedAt: new Date(item.requestedAt).toISOString(),
     };
   }
 
-  private shapeScheduleItem(item: RpcScheduleItem): BarberHomeScheduleItemDto {
+  private static shapeScheduleItem(item: RpcScheduleItem, tz: string): BarberHomeScheduleItemDto {
+    const totalDurationMinutes = Number(item.totalDurationMinutes ?? 0);
+    const time = projectBookingTime(item.scheduledAt, tz);
     return {
       bookingId: item.bookingId,
       client: {
@@ -165,15 +194,33 @@ export class BarberHomeService {
         ? {
             id: item.service.id,
             name: item.service.name,
+            // RPC now emits TOTAL block duration here for the legacy field.
             durationMinutes: Number(item.service.durationMinutes ?? 0),
           }
         : null,
-      scheduledAt: new Date(item.scheduledAt).toISOString(),
+      services: BarberHomeService.shapeBookingServices(item.services),
+      totalDurationMinutes,
+      scheduledAt: time.scheduledAt,
+      timezone: time.timezone,
+      appointmentDate: time.appointmentDate,
+      appointmentTime: time.appointmentTime,
       endAt: new Date(item.endAt).toISOString(),
       minutesUntilStart: Number(item.minutesUntilStart ?? 0),
       priceUsd: Number(item.priceUsd ?? 0),
       status: item.status as BookingStatusDto,
     };
+  }
+
+  private static shapeBookingServices(
+    rows: RpcBookingServiceItem[] | null | undefined
+  ): BarberHomeBookingServiceItemDto[] {
+    if (!rows || rows.length === 0) return [];
+    return rows.map((s) => ({
+      id: s.id,
+      name: s.name,
+      durationMinutes: Number(s.durationMinutes ?? 0),
+      bookingType: s.bookingType as BookingTypeDto,
+    }));
   }
 
   // ────────────────────────────────────────────────────────────
@@ -185,13 +232,13 @@ export class BarberHomeService {
 
   private resolveTimezone(stored: string | null, override?: string): string {
     if (override !== undefined) {
-      if (!this.isValidTimezone(override)) {
+      if (!isValidTimezone(override)) {
         throw new UnprocessableEntityException(`Invalid IANA timezone: ${override}`);
       }
       return override;
     }
-    if (stored && this.isValidTimezone(stored)) return stored;
-    return 'UTC';
+    if (stored && isValidTimezone(stored)) return stored;
+    return BARBER_DEFAULT_TIMEZONE;
   }
 
   private async loadBarberSettings(barberId: string): Promise<{
@@ -233,25 +280,4 @@ export class BarberHomeService {
     };
   }
 
-  private isValidTimezone(tz: string): boolean {
-    try {
-      new Intl.DateTimeFormat('en-US', { timeZone: tz });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  private localDateInTz(instant: Date, timezone: string): string {
-    const parts = new Intl.DateTimeFormat('en-CA', {
-      timeZone: timezone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    }).formatToParts(instant);
-    const y = parts.find((p) => p.type === 'year')?.value ?? '';
-    const m = parts.find((p) => p.type === 'month')?.value ?? '';
-    const d = parts.find((p) => p.type === 'day')?.value ?? '';
-    return `${y}-${m}-${d}`;
-  }
 }

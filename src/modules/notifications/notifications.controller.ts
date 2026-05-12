@@ -34,6 +34,7 @@ import {
 } from './dto/remove-device-token.dto';
 import { ListNotificationsQueryDto } from './dto/list-notifications-query.dto';
 import {
+  ClearAllNotificationsResponseDto,
   ListNotificationsResponseDto,
   MarkNotificationReadResponseDto,
   UnreadCountResponseDto,
@@ -130,6 +131,19 @@ export class BarberNotificationsController {
   ): Promise<MarkNotificationReadResponseDto> {
     return this.notificationsService.markAsRead(user.sub, 'barber', notificationId);
   }
+
+  @Post('clear-all')
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      "\"Clear all\" — marks every unread notification for the barber as read. Returns the number of rows transitioned. Idempotent: returns updated=0 when nothing was unread.",
+  })
+  @ApiResponse({ status: 200, type: ClearAllNotificationsResponseDto })
+  public async clearAll(
+    @CurrentUser() user: SupabaseUserPayload,
+  ): Promise<ClearAllNotificationsResponseDto> {
+    return this.notificationsService.clearAll(user.sub, 'barber');
+  }
 }
 
 @ApiTags('Barber Notification Settings')
@@ -205,5 +219,18 @@ export class ClientNotificationsController {
     @Param('notificationId', ParseUUIDPipe) notificationId: string,
   ): Promise<MarkNotificationReadResponseDto> {
     return this.notificationsService.markAsRead(user.sub, 'client', notificationId);
+  }
+
+  @Post('clear-all')
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      "\"Clear all\" — marks every unread notification for the client as read. Returns the number of rows transitioned. Idempotent: returns updated=0 when nothing was unread.",
+  })
+  @ApiResponse({ status: 200, type: ClearAllNotificationsResponseDto })
+  public async clearAll(
+    @CurrentUser() user: SupabaseUserPayload,
+  ): Promise<ClearAllNotificationsResponseDto> {
+    return this.notificationsService.clearAll(user.sub, 'client');
   }
 }

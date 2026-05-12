@@ -23,7 +23,10 @@ import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { SupabaseUserPayload } from '../../supabase/supabase.service';
 import { RecurringArrangementsService } from './recurring-arrangements.service';
 import { CreateRecurringArrangementDto } from './dto/create-recurring-arrangement.dto';
-import { ListRecurringArrangementsQueryDto } from './dto/list-recurring-arrangements-query.dto';
+import {
+  ListRecurringArrangementsQueryDto,
+  RecurringArrangementStatusFilter,
+} from './dto/list-recurring-arrangements-query.dto';
 import { RejectRecurringArrangementDto } from './dto/reject-recurring-arrangement.dto';
 import {
   RecurringArrangementResponseDto,
@@ -118,6 +121,22 @@ export class ClientRecurringArrangementsController {
     @Query() query: ListRecurringArrangementsQueryDto,
   ): Promise<RecurringArrangementsListResponseDto> {
     return this.service.listForClient(user.sub, query);
+  }
+
+  @Get('pending')
+  @ApiOperation({
+    summary:
+      'List recurring arrangements proposed by a barber that are awaiting THIS client\'s approval (status = pending_client_approval). Convenience wrapper over the list endpoint — supports the same limit/cursor pagination.',
+  })
+  @ApiResponse({ status: 200, type: RecurringArrangementsListResponseDto })
+  public async listPending(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Query() query: ListRecurringArrangementsQueryDto,
+  ): Promise<RecurringArrangementsListResponseDto> {
+    return this.service.listForClient(user.sub, {
+      ...query,
+      status: RecurringArrangementStatusFilter.PENDING_CLIENT_APPROVAL,
+    });
   }
 
   @Get(':id')
