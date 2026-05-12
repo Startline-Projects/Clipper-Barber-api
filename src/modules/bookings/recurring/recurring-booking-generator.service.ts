@@ -157,10 +157,24 @@ export class RecurringBookingGeneratorService {
     let succeeded = 0;
     let conflictSkipped = 0;
     let otherErrorSkipped = 0;
+    let pastSkipped = 0;
+
+    const nowMs = Date.now();
 
     for (const date of targetDates) {
       try {
         const scheduledAt = composeUtcFromLocal(date, slotTime, barber.timezone);
+        // Never materialise an occurrence whose wall-clock slot has already
+        // passed. Without this guard a same-day creation (or a top-up cron
+        // run after the slot time on a matching DOW) would insert a
+        // confirmed booking in the past, which the hourly completion sweep
+        // then flips to 'completed' — producing a freshly-created booking
+        // that appears to have already happened. Mirrors the same check in
+        // restorePausedOccurrences.
+        if (scheduledAt.getTime() <= nowMs) {
+          pastSkipped++;
+          continue;
+        }
         const scheduledIso = scheduledAt.toISOString();
         if (existing.has(scheduledIso)) {
           continue;
@@ -245,7 +259,7 @@ export class RecurringBookingGeneratorService {
     }
 
     this.logger.log(
-      `Generator summary for recurring_booking ${recurringBookingId}: target=${targetDates.length} succeeded=${succeeded} conflictSkipped=${conflictSkipped} otherErrorSkipped=${otherErrorSkipped}`,
+      `Generator summary for recurring_booking ${recurringBookingId}: target=${targetDates.length} succeeded=${succeeded} pastSkipped=${pastSkipped} conflictSkipped=${conflictSkipped} otherErrorSkipped=${otherErrorSkipped}`,
     );
 
     void this.conversationsService.markHasBookingIfConversationExists(

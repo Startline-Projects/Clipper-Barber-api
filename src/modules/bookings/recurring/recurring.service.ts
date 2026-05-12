@@ -49,6 +49,7 @@ import {
   localDateInTz,
   minutesToTime,
   nextMatchingDates,
+  splitLocalDateTime,
   timeToMinutes,
 } from './recurring-time.util';
 
@@ -848,7 +849,7 @@ export class RecurringBookingsService {
         const next = nextOccurrenceMap.get(row.id);
         const timezone = await this.fetchBarberTimezone(row.barber_id);
         const local = next
-          ? this.splitLocalDateTime(next.scheduled_at, timezone)
+          ? splitLocalDateTime(next.scheduled_at, timezone)
           : { date: null, time: null };
 
         return {
@@ -959,28 +960,6 @@ export class RecurringBookingsService {
     return ClientRecurringStatusDto.PENDING_APPROVAL;
   }
 
-  private splitLocalDateTime(
-    utcIso: string,
-    timezone: string,
-  ): { date: string; time: string } {
-    const instant = new Date(utcIso);
-    const parts = new Intl.DateTimeFormat('en-CA', {
-      timeZone: timezone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    }).formatToParts(instant);
-    const pick = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
-    const y = pick('year');
-    const mo = pick('month');
-    const d = pick('day');
-    const h = pick('hour') === '24' ? '00' : pick('hour');
-    const mi = pick('minute');
-    return { date: `${y}-${mo}-${d}`, time: `${h}:${mi}` };
-  }
 
   private async listRecurringBookings(
     owner: { clientId?: string; barberId?: string },

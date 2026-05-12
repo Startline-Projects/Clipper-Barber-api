@@ -1,5 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { BookingStatusDto } from '../../dto/list-barber-bookings-query.dto';
+import { BookingTypeDto } from '../../../bookings/dto/preview-booking.dto';
 
 export class BarberHomeClientDto {
   @ApiProperty({ format: 'uuid' }) id: string;
@@ -13,7 +14,18 @@ export class BarberHomeServiceDto {
 }
 
 export class BarberHomeScheduleServiceDto extends BarberHomeServiceDto {
+  @ApiProperty({
+    example: 60,
+    description: 'Total block duration of the booking (NOT this service\'s nominal duration).',
+  })
+  durationMinutes: number;
+}
+
+export class BarberHomeBookingServiceItemDto {
+  @ApiProperty({ format: 'uuid' }) id: string;
+  @ApiProperty() name: string;
   @ApiProperty({ example: 30 }) durationMinutes: number;
+  @ApiProperty({ enum: BookingTypeDto }) bookingType: BookingTypeDto;
 }
 
 export class BarberHomeTodayDto {
@@ -48,7 +60,16 @@ export class BarberHomePendingItemDto {
   @ApiProperty({ type: BarberHomeClientDto }) client: BarberHomeClientDto;
   @ApiProperty({ type: BarberHomeServiceDto, nullable: true })
   service: BarberHomeServiceDto | null;
-  @ApiProperty() scheduledAt: string;
+  @ApiProperty({ type: [BarberHomeBookingServiceItemDto] })
+  services: BarberHomeBookingServiceItemDto[];
+  @ApiProperty({ example: '2026-05-12T00:30:00.000Z', description: 'UTC instant (ISO 8601)' })
+  scheduledAt: string;
+  @ApiProperty({ example: 'America/New_York', description: 'Barber IANA timezone' })
+  timezone: string;
+  @ApiProperty({ example: '2026-05-11', description: 'Local calendar date in `timezone` (YYYY-MM-DD)' })
+  appointmentDate: string;
+  @ApiProperty({ example: '20:30', description: 'Local wall-clock in `timezone` (HH:MM)' })
+  appointmentTime: string;
   @ApiProperty({ example: 400 }) priceUsd: number;
   @ApiProperty({ enum: BookingStatusDto, example: BookingStatusDto.PENDING })
   status: BookingStatusDto;
@@ -68,8 +89,19 @@ export class BarberHomeScheduleItemDto {
   @ApiProperty({ type: BarberHomeClientDto }) client: BarberHomeClientDto;
   @ApiProperty({ type: BarberHomeScheduleServiceDto, nullable: true })
   service: BarberHomeScheduleServiceDto | null;
-  @ApiProperty() scheduledAt: string;
-  @ApiProperty() endAt: string;
+  @ApiProperty({ type: [BarberHomeBookingServiceItemDto] })
+  services: BarberHomeBookingServiceItemDto[];
+  @ApiProperty({ example: 60 }) totalDurationMinutes: number;
+  @ApiProperty({ example: '2026-05-12T00:30:00.000Z', description: 'UTC instant (ISO 8601)' })
+  scheduledAt: string;
+  @ApiProperty({ example: 'America/New_York', description: 'Barber IANA timezone' })
+  timezone: string;
+  @ApiProperty({ example: '2026-05-11', description: 'Local calendar date in `timezone` (YYYY-MM-DD)' })
+  appointmentDate: string;
+  @ApiProperty({ example: '20:30', description: 'Local wall-clock in `timezone` (HH:MM)' })
+  appointmentTime: string;
+  @ApiProperty({ example: '2026-05-12T01:30:00.000Z', description: 'UTC end instant (ISO 8601)' })
+  endAt: string;
 
   @ApiProperty({
     example: 45,

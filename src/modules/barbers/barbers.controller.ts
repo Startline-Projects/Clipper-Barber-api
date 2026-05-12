@@ -44,6 +44,10 @@ import {
   UpdateRecurringEnabledDto,
 } from './dto/update-recurring-enabled.dto';
 import {
+  InHouseServicesResponseDto,
+  UpdateInHouseServicesDto,
+} from './dto/update-in-house-services.dto';
+import {
   NoShowChargeSettingsResponseDto,
   UpdateNoShowChargeDto,
 } from './dto/update-no-show-charge.dto';
@@ -256,5 +260,19 @@ export class BarberSettingsController {
     @Body() dto: UpdateNoShowChargeDto
   ): Promise<NoShowChargeSettingsResponseDto> {
     return this.barbersService.updateNoShowChargeSettings(user.sub, dto);
+  }
+
+  @Patch('in-house-services')
+  @ApiOperation({
+    summary:
+      'Toggle whether the barber offers in-house (on-premises) services. Persisted on barbers.in_house_services.',
+  })
+  @ApiBody({ type: UpdateInHouseServicesDto })
+  @ApiResponse({ status: 200, type: InHouseServicesResponseDto })
+  public async updateInHouseServices(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Body() dto: UpdateInHouseServicesDto
+  ): Promise<InHouseServicesResponseDto> {
+    return this.barbersService.updateInHouseServices(user.sub, dto.enabled);
   }
 }

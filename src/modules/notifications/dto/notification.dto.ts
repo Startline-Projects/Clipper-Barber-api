@@ -89,3 +89,8 @@ export class UnreadCountResponseDto {
   @ApiProperty()
   unreadCount!: number;
 }
+
+export class ClearAllNotificationsResponseDto {
+  @ApiProperty({ description: 'Number of notifications transitioned from unread to read.' })
+  updated!: number;
+}

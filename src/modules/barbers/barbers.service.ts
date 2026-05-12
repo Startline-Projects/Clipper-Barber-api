@@ -10,6 +10,14 @@ import { BookingCompletionService } from '../bookings/booking-completion.service
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationTypeDto } from '../notifications/dto/notification.dto';
 import { BookingTypeDto } from '../bookings/dto/preview-booking.dto';
+import {
+  projectBookingServices,
+  ProjectedBookingService,
+} from '../bookings/util/booking-services-projection';
+import {
+  BARBER_DEFAULT_TIMEZONE,
+  projectBookingTime,
+} from '../bookings/util/timezone.util';
 import { NoShowService } from '../payments/no-show.service';
 import { ConnectService } from '../payments/connect.service';
 import { ConnectRequired } from '../payments/payments.exceptions';
@@ -24,6 +32,7 @@ import {
 } from './dto/list-barber-bookings-query.dto';
 import {
   BarberBookingListItemDto,
+  BarberBookingServiceItemDto,
   BarberBookingsListResponseDto,
 } from './dto/barber-booking-list-item.dto';
 import {
@@ -36,6 +45,7 @@ import { CompleteBookingResponseDto } from './dto/complete-booking-response.dto'
 import { NoShowBookingResponseDto } from './dto/no-show-response.dto';
 import { AutoConfirmSettingsResponseDto } from './dto/auto-confirm-settings-response.dto';
 import { RecurringEnabledResponseDto } from './dto/update-recurring-enabled.dto';
+import { InHouseServicesResponseDto } from './dto/update-in-house-services.dto';
 import {
   NoShowChargeSettingsResponseDto,
   UpdateNoShowChargeDto,
@@ -105,6 +115,14 @@ interface ServiceLite {
   duration_minutes: number;
 }
 
+interface BookingServiceLite {
+  booking_id: string;
+  barber_service_id: string;
+  booking_type: string;
+  duration_minutes: number;
+  sort_order: number;
+}
+
 @Injectable()
 export class BarbersService {
   constructor(
@@ -117,6 +135,16 @@ export class BarbersService {
 
   private get db() {
     return this.supabaseService.getClient();
+  }
+
+  private async fetchBarberTimezone(barberId: string): Promise<string> {
+    const { data, error } = await this.db
+      .from('barbers')
+      .select('timezone')
+      .eq('user_id', barberId)
+      .maybeSingle();
+    if (error) throw new InternalServerErrorException('Failed to fetch barber timezone');
+    return (data?.timezone as string | null | undefined) ?? BARBER_DEFAULT_TIMEZONE;
   }
 
   // ────────────────────────────────────────────────────────────
@@ -174,14 +202,32 @@ export class BarbersService {
     const hasMore = rows.length > limit;
     const pageRows = hasMore ? rows.slice(0, limit) : rows;
 
-    const { clientMap, serviceMap } = await this.loadRelated(
-      pageRows.map((r) => r.client_id),
-      pageRows.map((r) => r.barber_service_id).filter((id): id is string => !!id)
+    const servicesByBooking = await this.loadBookingServicesByBookingIds(
+      pageRows.map((r) => r.id)
     );
+
+    // Collect every service id referenced (primary FK on bookings + each
+    // booking_services row) so we can hydrate names/durations in one query.
+    const allServiceIds = new Set<string>();
+    for (const r of pageRows) if (r.barber_service_id) allServiceIds.add(r.barber_service_id);
+    for (const list of servicesByBooking.values())
+      for (const s of list) allServiceIds.add(s.barber_service_id);
+
+    const [{ clientMap, serviceMap }, barberTz] = await Promise.all([
+      this.loadRelated(pageRows.map((r) => r.client_id), Array.from(allServiceIds)),
+      this.fetchBarberTimezone(barberId),
+    ]);
 
     const bookings: BarberBookingListItemDto[] = pageRows.map((r) => {
       const client = clientMap.get(r.client_id);
-      const service = r.barber_service_id ? serviceMap.get(r.barber_service_id) : undefined;
+      const services = this.buildBarberServiceItems(
+        servicesByBooking.get(r.id) ?? [],
+        r.barber_service_id,
+        serviceMap
+      );
+      const primary = services[0];
+      const totalDurationMinutes = r.duration_minutes ?? 0;
+      const time = projectBookingTime(r.scheduled_at, barberTz);
       return {
         id: r.id,
         client: {
@@ -189,11 +235,18 @@ export class BarbersService {
           name: client?.name ?? 'Unknown',
           profilePhotoUrl: client?.profile_photo_url ?? null,
         },
+        // Legacy field — populate with primary service NAME but TOTAL block
+        // duration so older mobile builds render the correct visual height.
         service: {
-          name: service?.name ?? 'Service',
-          durationMinutes: service?.duration_minutes ?? r.duration_minutes ?? 0,
+          name: primary?.name ?? 'Service',
+          durationMinutes: totalDurationMinutes,
         },
-        scheduledAt: new Date(r.scheduled_at).toISOString(),
+        services,
+        totalDurationMinutes,
+        scheduledAt: time.scheduledAt,
+        timezone: time.timezone,
+        appointmentDate: time.appointmentDate,
+        appointmentTime: time.appointmentTime,
         bookingType: r.booking_type as BookingTypeDto,
         totalPrice: Number(r.price_usd),
         status: r.status as BookingStatusDto,
@@ -226,15 +279,27 @@ export class BarbersService {
 
     const row = data as BookingRowForDetail;
 
-    const { clientMap, serviceMap } = await this.loadRelated(
-      [row.client_id],
-      row.barber_service_id ? [row.barber_service_id] : []
-    );
+    const servicesByBooking = await this.loadBookingServicesByBookingIds([row.id]);
+    const bookingServiceRows = servicesByBooking.get(row.id) ?? [];
 
-    // TODO: attach full booking history count for this client once the
-    // client-stats helper is extracted.
+    const serviceIds = new Set<string>();
+    if (row.barber_service_id) serviceIds.add(row.barber_service_id);
+    for (const s of bookingServiceRows) serviceIds.add(s.barber_service_id);
+
+    const [{ clientMap, serviceMap }, barberTz] = await Promise.all([
+      this.loadRelated([row.client_id], Array.from(serviceIds)),
+      this.fetchBarberTimezone(barberId),
+    ]);
+
     const client = clientMap.get(row.client_id);
-    const service = row.barber_service_id ? serviceMap.get(row.barber_service_id) : undefined;
+    const services = this.buildBarberServiceItems(
+      bookingServiceRows,
+      row.barber_service_id,
+      serviceMap
+    );
+    const primary = services[0];
+    const totalDurationMinutes = row.duration_minutes ?? 0;
+    const time = projectBookingTime(row.scheduled_at, barberTz);
 
     const { count: reviewCount, error: reviewError } = await this.db
       .from('reviews')
@@ -261,10 +326,15 @@ export class BarbersService {
         profilePhotoUrl: client?.profile_photo_url ?? null,
       },
       service: {
-        name: service?.name ?? 'Service',
-        durationMinutes: service?.duration_minutes ?? row.duration_minutes ?? 0,
+        name: primary?.name ?? 'Service',
+        durationMinutes: totalDurationMinutes,
       },
-      scheduledAt: new Date(row.scheduled_at).toISOString(),
+      services,
+      totalDurationMinutes,
+      scheduledAt: time.scheduledAt,
+      timezone: time.timezone,
+      appointmentDate: time.appointmentDate,
+      appointmentTime: time.appointmentTime,
       bookingType: row.booking_type as BookingTypeDto,
       status: row.status as BookingStatusDto,
       pricing: { basePrice, additionalCost, totalPrice },
@@ -531,6 +601,23 @@ export class BarbersService {
     return { recurringEnabled: data.recurring_enabled as boolean };
   }
 
+  public async updateInHouseServices(
+    barberId: string,
+    enabled: boolean
+  ): Promise<InHouseServicesResponseDto> {
+    const { data, error } = await this.db
+      .from('barbers')
+      .update({ in_house_services: enabled })
+      .eq('user_id', barberId)
+      .select('in_house_services')
+      .maybeSingle();
+
+    if (error) throw new InternalServerErrorException('Failed to update in-house services flag');
+    if (!data) throw new NotFoundException('Barber profile not found');
+
+    return { inHouseServices: data.in_house_services as boolean };
+  }
+
   // ────────────────────────────────────────────────────────────
   // Barber profile — read / update
   // ────────────────────────────────────────────────────────────
@@ -706,6 +793,49 @@ export class BarbersService {
       allowAutoConfirm: data.allow_auto_confirm as boolean,
       autoConfirmToday: data.auto_confirm_today as boolean,
     };
+  }
+
+  // Batch-load booking_services rows for N bookings. Caller keys the map
+  // by booking_id; each list is sorted by sort_order so startOffsetMinutes
+  // is a running sum.
+  private async loadBookingServicesByBookingIds(
+    bookingIds: string[]
+  ): Promise<Map<string, BookingServiceLite[]>> {
+    const result = new Map<string, BookingServiceLite[]>();
+    if (bookingIds.length === 0) return result;
+
+    const { data, error } = await this.db
+      .from('booking_services')
+      .select(
+        'booking_id, barber_service_id, booking_type, duration_minutes, sort_order'
+      )
+      .in('booking_id', bookingIds)
+      .order('sort_order', { ascending: true });
+
+    if (error) throw new InternalServerErrorException('Failed to fetch booking services');
+
+    for (const row of (data ?? []) as BookingServiceLite[]) {
+      const list = result.get(row.booking_id) ?? [];
+      list.push(row);
+      result.set(row.booking_id, list);
+    }
+    return result;
+  }
+
+  // Project booking_services rows into the API shape. Falls back to the
+  // legacy single barber_service_id when no booking_services rows exist
+  // (legacy bookings predating the multi-service migration).
+  private buildBarberServiceItems(
+    rows: BookingServiceLite[],
+    legacyServiceId: string | null,
+    serviceMap: Map<string, ServiceLite>
+  ): BarberBookingServiceItemDto[] {
+    const projected: ProjectedBookingService[] = projectBookingServices(
+      rows,
+      legacyServiceId,
+      serviceMap
+    );
+    return projected;
   }
 
   private async loadRelated(

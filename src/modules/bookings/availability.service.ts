@@ -7,6 +7,8 @@ import {
   ServiceSummaryDto,
   SlotDto,
 } from './dto/availability-response.dto';
+import { BARBER_DEFAULT_TIMEZONE, composeUtcFromLocal } from './util/timezone.util';
+import { dayOfWeekFromDate } from './recurring/recurring-time.util';
 
 interface RawBarberRow {
   user_id: string;
@@ -78,7 +80,8 @@ export class AvailabilityService {
     if (barberError) throw new InternalServerErrorException('Failed to fetch barber');
     if (!barberRow) throw new NotFoundException('Barber not found');
 
-    const barberTimezone = (barberRow as RawBarberRow).timezone;
+    const barberTimezone =
+      (barberRow as RawBarberRow).timezone || BARBER_DEFAULT_TIMEZONE;
 
     // Step 2 — Fetch all requested services, preserving client-supplied order
     const requestedIds = query.serviceIds;
@@ -135,42 +138,41 @@ export class AvailabilityService {
       scheduleByDay.set((row as RawScheduleRow).day_of_week, row as RawScheduleRow);
     }
 
-    // Clamp effective start to today (never return past dates)
+    // All date math is done in UTC-ms space against the calendar dates
+    // supplied by the client. The barber's tz is only consulted when we
+    // convert local wall-clock slot times into UTC instants for overlap
+    // checks. We never lean on server-local Date arithmetic.
+    const requestedStartMs = parseCalendarDateUtcMs(query.startDate);
+    const endDateMs = parseCalendarDateUtcMs(query.endDate);
     const now = new Date();
-    const todayStr = this.formatDate(now);
-    const requestedStart = new Date(query.startDate);
-    const today = new Date(todayStr);
-    const effectiveStart = requestedStart < today ? today : requestedStart;
-    const endDate = new Date(query.endDate);
+    const todayMs = parseCalendarDateUtcMs(this.formatDate(now));
+    const effectiveStartMs = Math.max(requestedStartMs, todayMs);
 
     // Step 4 — Fetch blocking bookings in range.
     //   Widen by ±1 day for TZ safety. For each booking we expand into the set
     //   of grid slots it occupies based on its duration, so multi-slot bookings
     //   block every grid position they cover — not just the start.
-    const rangeStart = new Date(effectiveStart);
-    rangeStart.setDate(rangeStart.getDate() - 1);
-    const rangeEnd = new Date(endDate);
-    rangeEnd.setDate(rangeEnd.getDate() + 2);
+    const rangeStartMs = effectiveStartMs - 86_400_000;
+    const rangeEndMs = endDateMs + 2 * 86_400_000;
 
     const { data: bookingRows, error: bookingError } = await this.db
       .from('bookings')
       .select('scheduled_at, duration_minutes')
       .eq('barber_id', barberId)
-      .gte('scheduled_at', this.formatDate(rangeStart))
-      .lt('scheduled_at', this.formatDate(rangeEnd))
+      .gte('scheduled_at', utcMsToDateStr(rangeStartMs))
+      .lt('scheduled_at', utcMsToDateStr(rangeEndMs))
       .in('status', ['confirmed', 'pending']);
 
     if (bookingError) throw new InternalServerErrorException('Failed to fetch bookings');
 
     // Steps 5 & 6 — Generate and mark slots for each date
     const days: AvailabilityDayDto[] = [];
-    const totalDays = Math.floor((endDate.getTime() - effectiveStart.getTime()) / 86_400_000) + 1;
+    const totalDays = Math.floor((endDateMs - effectiveStartMs) / 86_400_000) + 1;
 
     for (let i = 0; i < totalDays; i++) {
-      const current = new Date(effectiveStart);
-      current.setDate(current.getDate() + i);
-      const dateStr = this.formatDate(current);
-      const dayOfWeek = current.getDay();
+      const currentMs = effectiveStartMs + i * 86_400_000;
+      const dateStr = utcMsToDateStr(currentMs);
+      const dayOfWeek = dayOfWeekFromDate(dateStr);
       const schedule = scheduleByDay.get(dayOfWeek);
 
       if (!schedule) {
@@ -357,7 +359,7 @@ export class AvailabilityService {
 
     for (let m = startMinutes; m + blockDuration <= endMinutes; m += slotDuration) {
       const time = this.minutesToTime(m);
-      const slotUtcMs = this.composeUtcFromLocal(date, time, timezone).getTime();
+      const slotUtcMs = composeUtcFromLocal(date, time, timezone).getTime();
       if (slotUtcMs < advanceCutoffMs) continue;
 
       let available = true;
@@ -397,45 +399,20 @@ export class AvailabilityService {
   private formatDate(date: Date): string {
     return date.toISOString().split('T')[0];
   }
+}
 
-  private composeUtcFromLocal(date: string, time: string, timezone: string): Date {
-    const [y, mo, d] = date.split('-').map(Number);
-    const [h, mi] = time.split(':').map(Number);
-    const targetUtcMs = Date.UTC(y, mo - 1, d, h, mi, 0);
+// Parse a YYYY-MM-DD calendar date into a UTC-midnight instant in ms.
+// Used as the canonical frame for date arithmetic so server-local TZ never
+// leaks into the result.
+function parseCalendarDateUtcMs(date: string): number {
+  const [y, m, d] = date.split('-').map(Number);
+  return Date.UTC(y, m - 1, d);
+}
 
-    let offsetMs = this.tzOffsetMs(new Date(targetUtcMs), timezone);
-    let guess = new Date(targetUtcMs - offsetMs);
-    offsetMs = this.tzOffsetMs(guess, timezone);
-    guess = new Date(targetUtcMs - offsetMs);
-    return guess;
-  }
-
-  private tzOffsetMs(instant: Date, timezone: string): number {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    }).formatToParts(instant);
-
-    const pick = (t: string): number => {
-      const part = parts.find((p) => p.type === t);
-      if (!part) throw new InternalServerErrorException(`Invalid timezone: ${timezone}`);
-      return Number(part.value);
-    };
-
-    const wallAsUtcMs = Date.UTC(
-      pick('year'),
-      pick('month') - 1,
-      pick('day'),
-      pick('hour') === 24 ? 0 : pick('hour'),
-      pick('minute'),
-      pick('second')
-    );
-    return wallAsUtcMs - instant.getTime();
-  }
+function utcMsToDateStr(ms: number): string {
+  const day = new Date(ms);
+  const yy = day.getUTCFullYear();
+  const mm = (day.getUTCMonth() + 1).toString().padStart(2, '0');
+  const dd = day.getUTCDate().toString().padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
 }

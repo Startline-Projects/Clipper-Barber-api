@@ -1,6 +1,17 @@
-import { InternalServerErrorException } from '@nestjs/common';
+// Recurrence-specific helpers. The general-purpose timezone primitives live
+// in `../util/timezone.util.ts` and are re-exported below so existing
+// imports keep working.
+
+import {
+  composeUtcFromLocal,
+  localDateInTz,
+  splitLocalDateTime,
+  tzOffsetMs,
+} from '../util/timezone.util';
 
 const MINUTE_MS = 60_000;
+
+export { composeUtcFromLocal, localDateInTz, splitLocalDateTime, tzOffsetMs };
 
 export function timeToMinutes(time: string): number {
   const [h, m] = time.split(':').map(Number);
@@ -15,64 +26,6 @@ export function minutesToTime(totalMinutes: number): string {
 
 export function formatDate(date: Date): string {
   return date.toISOString().split('T')[0];
-}
-
-// Convert a wall-clock (date, time) in the given IANA timezone into a UTC Date.
-// Two passes are enough because IANA offsets are discrete per instant;
-// the second pass resolves wall-clocks near DST transitions.
-export function composeUtcFromLocal(date: string, time: string, timezone: string): Date {
-  const [y, mo, d] = date.split('-').map(Number);
-  const [h, mi] = time.split(':').map(Number);
-  const targetUtcMs = Date.UTC(y, mo - 1, d, h, mi, 0);
-
-  let offsetMs = tzOffsetMs(new Date(targetUtcMs), timezone);
-  let guess = new Date(targetUtcMs - offsetMs);
-  offsetMs = tzOffsetMs(guess, timezone);
-  guess = new Date(targetUtcMs - offsetMs);
-  return guess;
-}
-
-export function tzOffsetMs(instant: Date, timezone: string): number {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  }).formatToParts(instant);
-
-  const pick = (t: string): number => {
-    const part = parts.find((p) => p.type === t);
-    if (!part) throw new InternalServerErrorException(`Invalid timezone: ${timezone}`);
-    return Number(part.value);
-  };
-
-  const wallAsUtcMs = Date.UTC(
-    pick('year'),
-    pick('month') - 1,
-    pick('day'),
-    pick('hour') === 24 ? 0 : pick('hour'),
-    pick('minute'),
-    pick('second'),
-  );
-  return wallAsUtcMs - instant.getTime();
-}
-
-// Barber-local "today" (YYYY-MM-DD) at the given IANA timezone
-export function localDateInTz(instant: Date, timezone: string): string {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(instant);
-  const y = parts.find((p) => p.type === 'year')?.value ?? '';
-  const m = parts.find((p) => p.type === 'month')?.value ?? '';
-  const d = parts.find((p) => p.type === 'day')?.value ?? '';
-  return `${y}-${m}-${d}`;
 }
 
 // Day-of-week (0=Sun..6=Sat) for a YYYY-MM-DD calendar date.

@@ -27,9 +27,18 @@ import {
 import { ClientBookingsPageQueryDto } from './dto/client-bookings-page-query.dto';
 import {
   ClientUpcomingBookingDto,
+  ClientUpcomingBookingServiceDto,
   ClientUpcomingBookingsResponseDto,
 } from './dto/client-upcoming-booking.dto';
 import { ClientPastBookingDto, ClientPastBookingsResponseDto } from './dto/client-past-booking.dto';
+import { projectBookingServices } from './util/booking-services-projection';
+import {
+  BARBER_DEFAULT_TIMEZONE,
+  composeUtcFromLocal,
+  localDateInTz,
+  projectBookingTime,
+} from './util/timezone.util';
+import { dayOfWeekFromDate } from './recurring/recurring-time.util';
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 10;
@@ -267,16 +276,20 @@ export class BookingsService {
     const bookings: ClientPastBookingDto[] = rows.map((r) => {
       const barber = barberMap.get(r.barber_id);
       const service = r.barber_service_id ? serviceMap.get(r.barber_service_id) : undefined;
-      const tz = timezoneMap.get(r.barber_id) ?? 'UTC';
-      const local = this.splitLocalDateTime(r.scheduled_at, tz);
+      const tz = timezoneMap.get(r.barber_id) ?? BARBER_DEFAULT_TIMEZONE;
+      const time = projectBookingTime(r.scheduled_at, tz);
       return {
         id: r.id,
         barberName: barber?.full_name ?? 'Unknown',
         barberProfileImage: barber?.profile_photo_url ?? null,
         serviceName: service?.name ?? 'Service',
-        appointmentDate: local.date,
-        appointmentTime: local.time,
+        scheduledAt: time.scheduledAt,
+        timezone: time.timezone,
+        appointmentDate: time.appointmentDate,
+        appointmentTime: time.appointmentTime,
+        totalDurationMinutes: r.duration_minutes ?? 0,
         pricePaid: Number(r.price_usd),
+        status: r.status as BookingStatusDto,
         hasReview: reviewedIds.has(r.id),
       };
     });
@@ -335,31 +348,100 @@ export class BookingsService {
     ids.forEach((id, i) => orderIndex.set(id, i));
     rows.sort((a, b) => (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0));
 
+    const servicesByBooking = await this.loadUpcomingBookingServices(rows.map((r) => r.id));
+
+    const serviceIdSet = new Set<string>();
+    for (const r of rows) if (r.barber_service_id) serviceIdSet.add(r.barber_service_id);
+    for (const list of servicesByBooking.values())
+      for (const s of list) serviceIdSet.add(s.barber_service_id);
+
     const [{ barberMap, serviceMap }, timezoneMap] = await Promise.all([
-      this.loadClientBookingRelated(
-        rows.map((r) => r.barber_id),
-        rows.map((r) => r.barber_service_id).filter((id): id is string => !!id)
-      ),
+      this.loadClientBookingRelated(rows.map((r) => r.barber_id), Array.from(serviceIdSet)),
       this.fetchBarberTimezones(rows.map((r) => r.barber_id)),
     ]);
 
     return rows.map((r) => {
       const barber = barberMap.get(r.barber_id);
-      const service = r.barber_service_id ? serviceMap.get(r.barber_service_id) : undefined;
-      const tz = timezoneMap.get(r.barber_id) ?? 'UTC';
-      const local = this.splitLocalDateTime(r.scheduled_at, tz);
+      const tz = timezoneMap.get(r.barber_id) ?? BARBER_DEFAULT_TIMEZONE;
+      const time = projectBookingTime(r.scheduled_at, tz);
+      const services = this.buildUpcomingServiceItems(
+        servicesByBooking.get(r.id) ?? [],
+        r.barber_service_id,
+        serviceMap
+      );
+      const totalDurationMinutes = r.duration_minutes ?? 0;
+      // Joined display label so legacy single-string consumers ("Haircut")
+      // still get readable output for multi-service bookings.
+      const serviceName =
+        services.length > 1
+          ? services.map((s) => s.name).join(' + ')
+          : (services[0]?.name ?? 'Service');
       return {
         id: r.id,
         barberName: barber?.full_name ?? 'Unknown',
         barberProfileImage: barber?.profile_photo_url ?? null,
-        serviceName: service?.name ?? 'Service',
-        appointmentDate: local.date,
-        appointmentTime: local.time,
-        durationMinutes: r.duration_minutes ?? service?.duration_minutes ?? 0,
+        serviceName,
+        services,
+        scheduledAt: time.scheduledAt,
+        timezone: time.timezone,
+        appointmentDate: time.appointmentDate,
+        appointmentTime: time.appointmentTime,
+        durationMinutes: totalDurationMinutes,
+        totalDurationMinutes,
         status: r.status as BookingStatusDto,
         isRecurring: r.recurring_booking_id !== null,
       };
     });
+  }
+
+  private async loadUpcomingBookingServices(
+    bookingIds: string[]
+  ): Promise<Map<string, {
+    booking_id: string;
+    barber_service_id: string;
+    booking_type: string;
+    duration_minutes: number;
+    sort_order: number;
+  }[]>> {
+    const result = new Map<string, {
+      booking_id: string;
+      barber_service_id: string;
+      booking_type: string;
+      duration_minutes: number;
+      sort_order: number;
+    }[]>();
+    if (bookingIds.length === 0) return result;
+
+    const { data, error } = await this.db
+      .from('booking_services')
+      .select('booking_id, barber_service_id, booking_type, duration_minutes, sort_order')
+      .in('booking_id', bookingIds)
+      .order('sort_order', { ascending: true });
+
+    if (error) throw new InternalServerErrorException('Failed to fetch booking services');
+
+    for (const row of (data ?? []) as {
+      booking_id: string;
+      barber_service_id: string;
+      booking_type: string;
+      duration_minutes: number;
+      sort_order: number;
+    }[]) {
+      const list = result.get(row.booking_id) ?? [];
+      list.push(row);
+      result.set(row.booking_id, list);
+    }
+    return result;
+  }
+
+  // Falls back to the legacy primary FK when no booking_services rows
+  // exist (bookings predating the multi-service migration).
+  private buildUpcomingServiceItems(
+    rows: { barber_service_id: string; booking_type: string; duration_minutes: number }[],
+    legacyServiceId: string | null,
+    serviceMap: Map<string, ServiceLite>
+  ): ClientUpcomingBookingServiceDto[] {
+    return projectBookingServices(rows, legacyServiceId, serviceMap);
   }
 
   private async fetchReviewedBookingIds(bookingIds: string[]): Promise<Set<string>> {
@@ -388,29 +470,9 @@ export class BookingsService {
 
     if (error) throw new InternalServerErrorException('Failed to fetch barber timezones');
     for (const row of data ?? []) {
-      result.set(row.user_id as string, (row.timezone as string) ?? 'UTC');
+      result.set(row.user_id as string, (row.timezone as string) ?? BARBER_DEFAULT_TIMEZONE);
     }
     return result;
-  }
-
-  private splitLocalDateTime(utcIso: string, timezone: string): { date: string; time: string } {
-    const instant = new Date(utcIso);
-    const parts = new Intl.DateTimeFormat('en-CA', {
-      timeZone: timezone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    }).formatToParts(instant);
-    const pick = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
-    const y = pick('year');
-    const mo = pick('month');
-    const d = pick('day');
-    const h = pick('hour') === '24' ? '00' : pick('hour');
-    const mi = pick('minute');
-    return { date: `${y}-${mo}-${d}`, time: `${h}:${mi}` };
   }
 
   public async getClientBookingDetail(
@@ -429,7 +491,7 @@ export class BookingsService {
 
     const row = data as ClientBookingDetailRow;
 
-    const [bookingServicesSummary, { barberMap }, reviewResult] = await Promise.all([
+    const [bookingServicesSummary, { barberMap }, reviewResult, timezoneMap] = await Promise.all([
       this.loadBookingServicesDetail(row.id),
       this.loadClientBookingRelated([row.barber_id], []),
       this.db
@@ -437,7 +499,12 @@ export class BookingsService {
         .select('id, rating, comment, created_at')
         .eq('booking_id', bookingId)
         .maybeSingle(),
+      this.fetchBarberTimezones([row.barber_id]),
     ]);
+    const detailTime = projectBookingTime(
+      row.scheduled_at,
+      timezoneMap.get(row.barber_id) ?? BARBER_DEFAULT_TIMEZONE,
+    );
 
     if (reviewResult.error) throw new InternalServerErrorException('Failed to fetch review');
 
@@ -482,7 +549,10 @@ export class BookingsService {
         profilePhotoUrl: barber?.profile_photo_url ?? null,
       },
       services: bookingServicesSummary,
-      scheduledAt: new Date(row.scheduled_at).toISOString(),
+      scheduledAt: detailTime.scheduledAt,
+      timezone: detailTime.timezone,
+      appointmentDate: detailTime.appointmentDate,
+      appointmentTime: detailTime.appointmentTime,
       totalDurationMinutes,
       totalPrice,
       status: row.status as BookingStatusDto,
@@ -623,7 +693,7 @@ export class BookingsService {
   ): Promise<CancelBookingResponseDto> {
     const { data: existingBooking, error: fetchError } = await this.db
       .from('bookings')
-      .select('id, status, scheduled_at')
+      .select('id, status, scheduled_at, barber_id')
       .eq('id', bookingId)
       .eq('client_id', clientId)
       .maybeSingle();
@@ -660,10 +730,18 @@ export class BookingsService {
       throw new InternalServerErrorException('Failed to cancel booking');
     }
 
+    const tzMap = await this.fetchBarberTimezones([existingBooking.barber_id as string]);
+    const cancelTime = projectBookingTime(
+      updated.scheduled_at as string,
+      tzMap.get(existingBooking.barber_id as string) ?? BARBER_DEFAULT_TIMEZONE,
+    );
     const booking: CancelledBookingDto = {
       id: updated.id as string,
       status: updated.status as string,
-      scheduledAt: new Date(updated.scheduled_at as string).toISOString(),
+      scheduledAt: cancelTime.scheduledAt,
+      timezone: cancelTime.timezone,
+      appointmentDate: cancelTime.appointmentDate,
+      appointmentTime: cancelTime.appointmentTime,
       cancelledAt: new Date(updated.cancelled_at as string).toISOString(),
       cancelledBy: updated.cancelled_by as 'client' | 'barber',
     };
@@ -700,8 +778,12 @@ export class BookingsService {
   ): Promise<PreviewBookingResponseDto> {
     const ctx = await this.validateBookingSlot(authUserId, dto);
 
+    const time = projectBookingTime(ctx.scheduledAtUtc, ctx.barberProfile.timezone);
     const preview: BookingPreviewDto = {
-      scheduledAt: ctx.scheduledAtUtc.toISOString(),
+      scheduledAt: time.scheduledAt,
+      timezone: time.timezone,
+      appointmentDate: time.appointmentDate,
+      appointmentTime: time.appointmentTime,
       totalDurationMinutes: ctx.totalDurationMinutes,
       services: ctx.services.map((s) => this.toServiceSummary(s)),
       pricing: ctx.totalPricing,
@@ -783,10 +865,14 @@ export class BookingsService {
       throw new InternalServerErrorException('Failed to create booking services');
     }
 
+    const confirmTime = projectBookingTime(row.scheduled_at, ctx.barberProfile.timezone);
     const booking: ConfirmedBookingDto = {
       id: row.id,
       status: row.status,
-      scheduledAt: new Date(row.scheduled_at).toISOString(),
+      scheduledAt: confirmTime.scheduledAt,
+      timezone: confirmTime.timezone,
+      appointmentDate: confirmTime.appointmentDate,
+      appointmentTime: confirmTime.appointmentTime,
       totalDurationMinutes: ctx.totalDurationMinutes,
       services: ctx.services.map((s) => this.toServiceSummary(s)),
       pricing: ctx.totalPricing,
@@ -832,24 +918,11 @@ export class BookingsService {
   ): 'pending' | 'confirmed' {
     if (barber.allow_auto_confirm) return 'confirmed';
     if (barber.auto_confirm_today) {
-      const slotLocalDate = this.formatLocalDate(scheduledAtUtc, barber.timezone);
-      const todayLocalDate = this.formatLocalDate(new Date(), barber.timezone);
+      const slotLocalDate = localDateInTz(scheduledAtUtc, barber.timezone);
+      const todayLocalDate = localDateInTz(new Date(), barber.timezone);
       if (slotLocalDate === todayLocalDate) return 'confirmed';
     }
     return 'pending';
-  }
-
-  private formatLocalDate(instant: Date, timezone: string): string {
-    const parts = new Intl.DateTimeFormat('en-CA', {
-      timeZone: timezone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    }).formatToParts(instant);
-    const y = parts.find((p) => p.type === 'year')?.value ?? '';
-    const m = parts.find((p) => p.type === 'month')?.value ?? '';
-    const d = parts.find((p) => p.type === 'day')?.value ?? '';
-    return `${y}-${m}-${d}`;
   }
 
   private async validateBookingSlot(
@@ -906,7 +979,7 @@ export class BookingsService {
     }
 
     // 4. Derive day-of-week and fetch the schedule for this day.
-    const dayOfWeek = this.dayOfWeekFromDate(dto.date);
+    const dayOfWeek = dayOfWeekFromDate(dto.date);
     const { data: scheduleRow, error: scheduleError } = await this.db
       .from('barber_schedules')
       .select('*')
@@ -957,7 +1030,7 @@ export class BookingsService {
     const totalDurationMinutes = dto.services.length * slotStep;
 
     // 6. Compose the UTC timestamp for the block start
-    const scheduledAtUtc = this.composeUtcFromLocal(dto.date, dto.slotTime, barberProfile.timezone);
+    const scheduledAtUtc = composeUtcFromLocal(dto.date, dto.slotTime, barberProfile.timezone);
 
     // 7. Advance notice check — UTC vs UTC, TZ-safe
     const advanceCutoff = new Date(
@@ -1094,52 +1167,6 @@ export class BookingsService {
   private timeToMinutes(time: string): number {
     const [hours, minutes] = time.split(':').map(Number);
     return hours * 60 + minutes;
-  }
-
-  private dayOfWeekFromDate(date: string): number {
-    const [y, m, d] = date.split('-').map(Number);
-    return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
-  }
-
-  private composeUtcFromLocal(date: string, time: string, timezone: string): Date {
-    const [y, mo, d] = date.split('-').map(Number);
-    const [h, mi] = time.split(':').map(Number);
-    const targetUtcMs = Date.UTC(y, mo - 1, d, h, mi, 0);
-
-    let offsetMs = this.tzOffsetMs(new Date(targetUtcMs), timezone);
-    let guess = new Date(targetUtcMs - offsetMs);
-    offsetMs = this.tzOffsetMs(guess, timezone);
-    guess = new Date(targetUtcMs - offsetMs);
-    return guess;
-  }
-
-  private tzOffsetMs(instant: Date, timezone: string): number {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    }).formatToParts(instant);
-
-    const pick = (t: string): number => {
-      const part = parts.find((p) => p.type === t);
-      if (!part) throw new InternalServerErrorException(`Invalid timezone: ${timezone}`);
-      return Number(part.value);
-    };
-
-    const wallAsUtcMs = Date.UTC(
-      pick('year'),
-      pick('month') - 1,
-      pick('day'),
-      pick('hour') === 24 ? 0 : pick('hour'),
-      pick('minute'),
-      pick('second')
-    );
-    return wallAsUtcMs - instant.getTime();
   }
 
   private resolvePricing(

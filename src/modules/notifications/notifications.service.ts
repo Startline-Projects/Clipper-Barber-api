@@ -14,6 +14,7 @@ import {
 } from './dto/register-device-token.dto';
 import { RemoveDeviceTokenResponseDto } from './dto/remove-device-token.dto';
 import {
+  ClearAllNotificationsResponseDto,
   ListNotificationsResponseDto,
   MarkNotificationReadResponseDto,
   NotificationDto,
@@ -342,6 +343,21 @@ export class NotificationsService {
     if (error || !data) throw new InternalServerErrorException('Failed to mark as read');
 
     return { id: data.id as string, isRead: data.is_read as boolean };
+  }
+
+  public async clearAll(
+    recipientId: string,
+    recipientType: RecipientType,
+  ): Promise<ClearAllNotificationsResponseDto> {
+    const { error, count } = await this.db
+      .from('notifications')
+      .update({ is_read: true }, { count: 'exact' })
+      .eq('recipient_id', recipientId)
+      .eq('recipient_type', recipientType)
+      .eq('is_read', false);
+
+    if (error) throw new InternalServerErrorException('Failed to clear notifications');
+    return { updated: count ?? 0 };
   }
 
   public async getUnreadCount(
