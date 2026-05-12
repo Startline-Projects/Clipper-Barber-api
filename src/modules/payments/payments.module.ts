@@ -7,11 +7,14 @@ import { CardsController } from './cards.controller';
 import { CardsService } from './cards.service';
 import { ConnectController } from './connect.controller';
 import { ConnectService } from './connect.service';
-import { NoShowService } from './no-show.service';
 import { WebhooksController } from './webhooks.controller';
 import { WebhooksService } from './webhooks.service';
 import { SubscriptionRequiredGuard } from './guards/subscription-required.guard';
 
+// Note: the legacy NoShowService (auto-charge on mark) has been removed.
+// The replacement lives in modules/no-shows (client-initiated payments).
+// WebhooksService still exposes a hook the no-shows module wires into via
+// the ModuleRef pattern documented in webhooks.service.ts.
 @Module({
   imports: [SupabaseModule],
   controllers: [SubscriptionsController, CardsController, ConnectController, WebhooksController],
@@ -20,10 +23,9 @@ import { SubscriptionRequiredGuard } from './guards/subscription-required.guard'
     SubscriptionsService,
     CardsService,
     ConnectService,
-    NoShowService,
     WebhooksService,
     SubscriptionRequiredGuard,
   ],
-  exports: [StripeService, NoShowService, ConnectService, SubscriptionRequiredGuard],
+  exports: [StripeService, ConnectService, WebhooksService, SubscriptionRequiredGuard],
 })
 export class PaymentsModule {}

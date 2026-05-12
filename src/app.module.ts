@@ -10,6 +10,7 @@ import { BarbersModule } from './modules/barbers/barbers.module';
 import { ScheduleModule as BarberScheduleModule } from './modules/schedule/schedule.module';
 import { BookingsModule } from './modules/bookings/bookings.module';
 import { PaymentsModule } from './modules/payments/payments.module';
+import { NoShowsModule } from './modules/no-shows/no-shows.module';
 import { MessagesModule } from './modules/messages/messages.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { ReviewsModule } from './modules/reviews/reviews.module';
@@ -25,6 +26,7 @@ import { ReviewsModule } from './modules/reviews/reviews.module';
     BarberScheduleModule,
     BookingsModule,
     PaymentsModule,
+    NoShowsModule,
     MessagesModule,
     NotificationsModule,
     ReviewsModule,

@@ -5,7 +5,9 @@ import {
   InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
+import { Inject, forwardRef } from '@nestjs/common';
 import { SupabaseService, SupabaseUserPayload } from '../supabase/supabase.service';
+import { NoShowsService } from '../no-shows/no-shows.service';
 import { splitLocalDateTime } from '../bookings/util/timezone.util';
 import {
   BarberSortDto,
@@ -125,7 +127,11 @@ interface ServiceLiteForBooking {
 
 @Injectable()
 export class ClientsService {
-  constructor(private readonly supabaseService: SupabaseService) {}
+  constructor(
+    private readonly supabaseService: SupabaseService,
+    @Inject(forwardRef(() => NoShowsService))
+    private readonly noShowsService: NoShowsService,
+  ) {}
 
   private get db() {
     return this.supabaseService.getClient();
@@ -204,11 +210,12 @@ export class ClientsService {
 
     const barber = barberData as BarberRow;
 
-    const [services, schedules, reviews, hasActivePlan] = await Promise.all([
+    const [services, schedules, reviews, hasActivePlan, unresolvedNoShowsCount] = await Promise.all([
       this.fetchAllServicesForBarber(barberId),
       this.fetchSchedulesForBarber(barberId),
       this.fetchRecentReviews(barberId),
       this.hasClientActivePlan(callerClientAuthId),
+      this.noShowsService.unresolvedCount(callerClientAuthId),
     ]);
 
     const reviewerIds = Array.from(new Set(reviews.map((r) => r.client_id)));
@@ -274,6 +281,8 @@ export class ClientsService {
       },
       distance: buildDistance(distanceKm),
       hasActivePlan,
+      unresolvedNoShowsCount,
+      hasBlockedNoShows: unresolvedNoShowsCount >= 3,
     };
   }
 

@@ -16,11 +16,13 @@ import { BarberHomeController } from './home/barber-home.controller';
 import { BarberHomeService } from './home/barber-home.service';
 import { BookingsModule } from '../bookings/bookings.module';
 import { PaymentsModule } from '../payments/payments.module';
+import { NoShowsModule } from '../no-shows/no-shows.module';
 
 @Module({
   imports: [
     BookingsModule,
     PaymentsModule,
+    NoShowsModule,
     MulterModule.register({
       storage: memoryStorage(),
       limits: { fileSize: 5 * 1024 * 1024 },
