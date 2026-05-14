@@ -22,6 +22,7 @@ import { AuthService } from './auth.service';
 import { BarberStep1Dto } from './dto/barber-step1.dto';
 import { BarberStep2Dto } from './dto/barber-step2.dto';
 import { BarberStep3Dto } from './dto/barber-step3.dto';
+import { BarberSignupCategoriesDto } from './dto/barber-step4.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ClientRegisterDto } from './dto/client-register.dto';
 import { LoginDto } from './dto/login.dto';
@@ -108,6 +109,28 @@ export class AuthController {
   ): Promise<BarberProfileResponseDto> {
     console.log(dto);
     return this.authService.updateBarberStep3(user.sub, dto, photo);
+  }
+
+  @Post('barber/step4')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('barber')
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Barber signup step 4 — categories / tags (optional)',
+    description:
+      'Saves the barber’s selected category/specialty tags. This step is OPTIONAL and can be skipped — sending no body (or an empty `categories` array) simply leaves the selection empty. Onboarding is already complete after step 3; this endpoint does not change onboarding state and the same tags can be edited later via PATCH /barber/profile. Returns the full barber profile.',
+  })
+  @ApiBody({ type: BarberSignupCategoriesDto })
+  @ApiResponse({
+    status: 201,
+    description: 'Categories saved — returns full barber profile',
+    type: BarberProfileResponseDto,
+  })
+  public updateBarberStep4(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Body() dto: BarberSignupCategoriesDto
+  ): Promise<BarberProfileResponseDto> {
+    return this.authService.updateBarberStep4(user.sub, dto);
   }
 
   @Post('client/register')

@@ -1,6 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { BookingStatusDto } from '../../dto/list-barber-bookings-query.dto';
 import { BookingTypeDto } from '../../../bookings/dto/preview-booking.dto';
+import { BarberCategoryTag } from '../../../../common/enums/barber-category-tag.enum';
 
 export class BarberHomeClientDto {
   @ApiProperty({ format: 'uuid' }) id: string;
@@ -16,7 +17,7 @@ export class BarberHomeServiceDto {
 export class BarberHomeScheduleServiceDto extends BarberHomeServiceDto {
   @ApiProperty({
     example: 60,
-    description: 'Total block duration of the booking (NOT this service\'s nominal duration).',
+    description: "Total block duration of the booking (NOT this service's nominal duration).",
   })
   durationMinutes: number;
 }
@@ -66,7 +67,10 @@ export class BarberHomePendingItemDto {
   scheduledAt: string;
   @ApiProperty({ example: 'America/New_York', description: 'Barber IANA timezone' })
   timezone: string;
-  @ApiProperty({ example: '2026-05-11', description: 'Local calendar date in `timezone` (YYYY-MM-DD)' })
+  @ApiProperty({
+    example: '2026-05-11',
+    description: 'Local calendar date in `timezone` (YYYY-MM-DD)',
+  })
   appointmentDate: string;
   @ApiProperty({ example: '20:30', description: 'Local wall-clock in `timezone` (HH:MM)' })
   appointmentTime: string;
@@ -96,7 +100,10 @@ export class BarberHomeScheduleItemDto {
   scheduledAt: string;
   @ApiProperty({ example: 'America/New_York', description: 'Barber IANA timezone' })
   timezone: string;
-  @ApiProperty({ example: '2026-05-11', description: 'Local calendar date in `timezone` (YYYY-MM-DD)' })
+  @ApiProperty({
+    example: '2026-05-11',
+    description: 'Local calendar date in `timezone` (YYYY-MM-DD)',
+  })
   appointmentDate: string;
   @ApiProperty({ example: '20:30', description: 'Local wall-clock in `timezone` (HH:MM)' })
   appointmentTime: string;
@@ -139,4 +146,11 @@ export class BarberHomeResponseDto {
 
   @ApiProperty({ description: 'True when both latitude and longitude are set on the profile' })
   locationSet: boolean;
+
+  @ApiProperty({
+    enum: BarberCategoryTag,
+    isArray: true,
+    description: 'Barber category/specialty tags. Empty array when none selected.',
+  })
+  categories: BarberCategoryTag[];
 }

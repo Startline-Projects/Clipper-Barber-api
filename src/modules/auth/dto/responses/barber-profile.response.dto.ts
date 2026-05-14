@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { BarberCategoryTag } from '../../../../common/enums/barber-category-tag.enum';
 
 export class BarberProfileResponseDto {
   @ApiProperty({ description: 'Canonical user id — same value as auth.users.id' })
@@ -66,6 +67,15 @@ export class BarberProfileResponseDto {
 
   @ApiProperty({ description: 'True when both latitude and longitude are set on the profile' })
   locationSet: boolean;
+
+  @ApiProperty({
+    enum: BarberCategoryTag,
+    isArray: true,
+    description:
+      'Barber category/specialty tags. Empty array when none selected. Includes IN_HOUSE_SERVICES when the barber offers in-house services.',
+    example: [BarberCategoryTag.SKIN_FADES, BarberCategoryTag.IN_HOUSE_SERVICES],
+  })
+  categories: BarberCategoryTag[];
 
   @ApiProperty()
   created_at: string;

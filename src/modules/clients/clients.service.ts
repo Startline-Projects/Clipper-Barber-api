@@ -26,14 +26,12 @@ import {
   BarberDetailServiceDto,
   BarberWorkingDayDto,
 } from './dto/barber-detail-response.dto';
-import {
-  ClientNextBookingDto,
-  ClientProfileResponseDto,
-} from './dto/client-profile-response.dto';
+import { ClientNextBookingDto, ClientProfileResponseDto } from './dto/client-profile-response.dto';
 import { UpdateClientProfileDto } from './dto/update-client-profile.dto';
 import { BookingStatusDto } from '../barbers/dto/list-barber-bookings-query.dto';
 import { ServiceType } from '../barbers/services/dto/create-barber-service.dto';
 import { buildDistance, haversineKm } from './utils/distance.util';
+import { normalizeCategories } from '../../common/enums/barber-category-tag.enum';
 import messages from '../../common/messages.json';
 
 const DEFAULT_PAGE = 1;
@@ -57,6 +55,7 @@ interface BarberRow {
   average_rating: number | string | null;
   total_reviews: number | null;
   recurring_enabled: boolean;
+  categories: string[] | null;
   onboarding_complete: boolean;
 }
 
@@ -130,16 +129,14 @@ export class ClientsService {
   constructor(
     private readonly supabaseService: SupabaseService,
     @Inject(forwardRef(() => NoShowsService))
-    private readonly noShowsService: NoShowsService,
+    private readonly noShowsService: NoShowsService
   ) {}
 
   private get db() {
     return this.supabaseService.getClient();
   }
 
-  public async listBarbersForClient(
-    query: ListBarbersQueryDto,
-  ): Promise<ListBarbersResponseDto> {
+  public async listBarbersForClient(query: ListBarbersQueryDto): Promise<ListBarbersResponseDto> {
     const page = query.page ?? DEFAULT_PAGE;
     const limit = Math.min(query.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
     const sort = query.sort ?? BarberSortDto.NEAREST;
@@ -176,6 +173,7 @@ export class ClientsService {
       totalReviews: row.total_reviews ?? 0,
       distance: buildDistance(distanceKm),
       recurringAvailable: row.recurring_enabled,
+      categories: normalizeCategories(row.categories),
       topServices: topServicesByBarber.get(row.user_id) ?? [],
     }));
 
@@ -194,12 +192,12 @@ export class ClientsService {
   public async getBarberDetail(
     callerClientAuthId: string,
     barberId: string,
-    query: GetBarberDetailQueryDto,
+    query: GetBarberDetailQueryDto
   ): Promise<BarberDetailResponseDto> {
     const { data: barberData, error: barberError } = await this.db
       .from('barbers')
       .select(
-        'user_id, full_name, profile_photo_url, bio, phone, street_address, city, state, zip_code, latitude, longitude, average_rating, total_reviews, recurring_enabled, onboarding_complete',
+        'user_id, full_name, profile_photo_url, bio, phone, street_address, city, state, zip_code, latitude, longitude, average_rating, total_reviews, recurring_enabled, categories, onboarding_complete'
       )
       .eq('user_id', barberId)
       .eq('onboarding_complete', true)
@@ -210,13 +208,15 @@ export class ClientsService {
 
     const barber = barberData as BarberRow;
 
-    const [services, schedules, reviews, hasActivePlan, unresolvedNoShowsCount] = await Promise.all([
-      this.fetchAllServicesForBarber(barberId),
-      this.fetchSchedulesForBarber(barberId),
-      this.fetchRecentReviews(barberId),
-      this.hasClientActivePlan(callerClientAuthId),
-      this.noShowsService.unresolvedCount(callerClientAuthId),
-    ]);
+    const [services, schedules, reviews, hasActivePlan, unresolvedNoShowsCount] = await Promise.all(
+      [
+        this.fetchAllServicesForBarber(barberId),
+        this.fetchSchedulesForBarber(barberId),
+        this.fetchRecentReviews(barberId),
+        this.hasClientActivePlan(callerClientAuthId),
+        this.noShowsService.unresolvedCount(callerClientAuthId),
+      ]
+    );
 
     const reviewerIds = Array.from(new Set(reviews.map((r) => r.client_id)));
     const reviewerMap = await this.fetchClientsLite(reviewerIds);
@@ -227,7 +227,7 @@ export class ClientsService {
             query.latitude,
             query.longitude,
             Number(barber.latitude),
-            Number(barber.longitude),
+            Number(barber.longitude)
           )
         : 0;
 
@@ -271,12 +271,12 @@ export class ClientsService {
         phone: barber.phone,
         workingHours,
         recurringAvailable: barber.recurring_enabled,
+        categories: normalizeCategories(barber.categories),
       },
       services: serviceDtos,
       reviews: reviewDtos,
       reviewsSummary: {
-        averageRating:
-          barber.average_rating !== null ? Number(barber.average_rating) : 0,
+        averageRating: barber.average_rating !== null ? Number(barber.average_rating) : 0,
         totalReviews: barber.total_reviews ?? 0,
       },
       distance: buildDistance(distanceKm),
@@ -313,7 +313,7 @@ export class ClientsService {
   public async updateProfile(
     user: SupabaseUserPayload,
     dto: UpdateClientProfileDto,
-    photo?: Express.Multer.File,
+    photo?: Express.Multer.File
   ): Promise<ClientProfileResponseDto> {
     if (dto.username !== undefined) {
       const { data: existing, error: existingError } = await this.db
@@ -366,7 +366,7 @@ export class ClientsService {
     const { data, error } = await this.db
       .from('clients')
       .select(
-        'user_id, name, username, profile_photo_url, subscription_status, subscription_expires_at, created_at',
+        'user_id, name, username, profile_photo_url, subscription_status, subscription_expires_at, created_at'
       )
       .eq('user_id', clientAuthId)
       .maybeSingle();
@@ -378,7 +378,7 @@ export class ClientsService {
 
   private async uploadClientPhoto(
     clientAuthId: string,
-    photo: Express.Multer.File,
+    photo: Express.Multer.File
   ): Promise<string> {
     const ext = photo.mimetype.split('/')[1] ?? 'jpg';
     const path = `profiles/${clientAuthId}/profile.${ext}`;
@@ -396,7 +396,7 @@ export class ClientsService {
   private buildClientProfileResponse(
     row: ClientRow,
     email: string | null,
-    nextUpcomingBooking: ClientNextBookingDto | null,
+    nextUpcomingBooking: ClientNextBookingDto | null
   ): ClientProfileResponseDto {
     return {
       id: row.user_id,
@@ -412,14 +412,14 @@ export class ClientsService {
   }
 
   private async fetchFirstUpcomingBookingForClient(
-    clientAuthId: string,
+    clientAuthId: string
   ): Promise<ClientNextBookingDto | null> {
     const nowIso = new Date().toISOString();
 
     const { data, error } = await this.db
       .from('bookings')
       .select(
-        'id, scheduled_at, status, duration_minutes, barber_id, barber_service_id, recurring_booking_id',
+        'id, scheduled_at, status, duration_minutes, barber_id, barber_service_id, recurring_booking_id'
       )
       .eq('client_id', clientAuthId)
       .in('status', ['pending', 'confirmed'])
@@ -511,12 +511,12 @@ export class ClientsService {
 
   private async fetchBarbersFiltered(
     query: ListBarbersQueryDto,
-    serviceMatchBarberIds: string[] | null,
+    serviceMatchBarberIds: string[] | null
   ): Promise<BarberRow[]> {
     let q = this.db
       .from('barbers')
       .select(
-        'user_id, full_name, profile_photo_url, bio, phone, street_address, city, state, zip_code, latitude, longitude, average_rating, total_reviews, recurring_enabled, onboarding_complete',
+        'user_id, full_name, profile_photo_url, bio, phone, street_address, city, state, zip_code, latitude, longitude, average_rating, total_reviews, recurring_enabled, categories, onboarding_complete'
       )
       .eq('onboarding_complete', true);
 
@@ -524,6 +524,13 @@ export class ClientsService {
       q = q.eq('recurring_enabled', true);
     } else if (query.recurring === RecurringFilterDto.NOT_AVAILABLE) {
       q = q.eq('recurring_enabled', false);
+    }
+
+    // Category filter — match barbers having ANY of the selected tags.
+    // `overlaps` maps to the `&&` array operator, backed by the
+    // barbers_categories_gin index.
+    if (query.categories && query.categories.length > 0) {
+      q = q.overlaps('categories', query.categories);
     }
 
     if (query.search && query.search.trim().length > 0) {
@@ -544,7 +551,7 @@ export class ClientsService {
 
   private sortBarbers(
     items: { row: BarberRow; distanceKm: number }[],
-    sort: BarberSortDto,
+    sort: BarberSortDto
   ): { row: BarberRow; distanceKm: number }[] {
     if (sort === BarberSortDto.TOP_RATED) {
       return [...items].sort((a, b) => {
@@ -557,9 +564,7 @@ export class ClientsService {
     return [...items].sort((a, b) => a.distanceKm - b.distanceKm);
   }
 
-  private async fetchTopServices(
-    barberIds: string[],
-  ): Promise<Map<string, BarberTopServiceDto[]>> {
+  private async fetchTopServices(barberIds: string[]): Promise<Map<string, BarberTopServiceDto[]>> {
     const result = new Map<string, BarberTopServiceDto[]>();
     if (barberIds.length === 0) return result;
 
@@ -572,7 +577,10 @@ export class ClientsService {
 
     if (error) throw new InternalServerErrorException('Failed to fetch services');
 
-    for (const row of (data ?? []) as Pick<BarberServiceRow, 'barber_id' | 'name' | 'sort_order'>[]) {
+    for (const row of (data ?? []) as Pick<
+      BarberServiceRow,
+      'barber_id' | 'name' | 'sort_order'
+    >[]) {
       const list = result.get(row.barber_id) ?? [];
       if (list.length < TOP_SERVICES_LIMIT) {
         list.push({ name: row.name });
@@ -639,7 +647,7 @@ export class ClientsService {
 
   private buildAddress(b: BarberRow): string | null {
     const parts = [b.street_address, b.city, b.state, b.zip_code].filter(
-      (s): s is string => !!s && s.length > 0,
+      (s): s is string => !!s && s.length > 0
     );
     return parts.length > 0 ? parts.join(', ') : null;
   }

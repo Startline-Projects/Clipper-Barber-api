@@ -18,6 +18,10 @@ import {
   localDateInTz,
   projectBookingTime,
 } from '../../bookings/util/timezone.util';
+import {
+  BarberCategoryTag,
+  normalizeCategories,
+} from '../../../common/enums/barber-category-tag.enum';
 
 interface RpcClient {
   id: string;
@@ -123,6 +127,7 @@ export class BarberHomeService {
         noShowChargeAmountUsd: settings.noShowChargeAmountUsd,
         stripeConnected: settings.stripeConnected,
         locationSet: settings.locationSet,
+        categories: settings.categories,
       };
     }
 
@@ -138,13 +143,13 @@ export class BarberHomeService {
       pendingApproval: {
         totalCount: Number(result.pendingApproval.totalCount ?? 0),
         items: (result.pendingApproval.items ?? []).map((it) =>
-          BarberHomeService.shapePendingItem(it, tz),
+          BarberHomeService.shapePendingItem(it, tz)
         ),
       },
       schedule: {
         totalUpcomingToday: Number(result.schedule.totalUpcomingToday ?? 0),
         items: (result.schedule.items ?? []).map((it) =>
-          BarberHomeService.shapeScheduleItem(it, tz),
+          BarberHomeService.shapeScheduleItem(it, tz)
         ),
       },
       allowAutoConfirm: settings.allowAutoConfirm,
@@ -154,6 +159,7 @@ export class BarberHomeService {
       noShowChargeAmountUsd: settings.noShowChargeAmountUsd,
       stripeConnected: settings.stripeConnected,
       locationSet: settings.locationSet,
+      categories: settings.categories,
     };
   }
 
@@ -166,9 +172,7 @@ export class BarberHomeService {
         fullName: item.client.fullName,
         profilePhotoUrl: item.client.profilePhotoUrl,
       },
-      service: item.service
-        ? { id: item.service.id, name: item.service.name }
-        : null,
+      service: item.service ? { id: item.service.id, name: item.service.name } : null,
       services: BarberHomeService.shapeBookingServices(item.services),
       scheduledAt: time.scheduledAt,
       timezone: time.timezone,
@@ -250,11 +254,12 @@ export class BarberHomeService {
     noShowChargeAmountUsd: number | null;
     stripeConnected: boolean;
     locationSet: boolean;
+    categories: BarberCategoryTag[];
   }> {
     const { data, error } = await this.db
       .from('barbers')
       .select(
-        'timezone, allow_auto_confirm, auto_confirm_today, recurring_enabled, no_show_charge_enabled, no_show_charge_amount_usd, stripe_connect_account_id, latitude, longitude'
+        'timezone, allow_auto_confirm, auto_confirm_today, recurring_enabled, no_show_charge_enabled, no_show_charge_amount_usd, stripe_connect_account_id, latitude, longitude, categories'
       )
       .eq('user_id', barberId)
       .maybeSingle();
@@ -277,7 +282,7 @@ export class BarberHomeService {
         data?.latitude !== undefined &&
         data?.longitude !== null &&
         data?.longitude !== undefined,
+      categories: normalizeCategories(data?.categories as string[] | null | undefined),
     };
   }
-
 }

@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
+  ArrayUnique,
+  IsArray,
   IsEnum,
   IsInt,
   IsLatitude,
@@ -11,6 +13,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { BarberCategoryTag } from '../../../common/enums/barber-category-tag.enum';
 
 export enum BarberSortDto {
   NEAREST = 'nearest',
@@ -48,6 +51,25 @@ export class ListBarbersQueryDto {
   @IsString()
   @MaxLength(100)
   search?: string;
+
+  @ApiPropertyOptional({
+    enum: BarberCategoryTag,
+    isArray: true,
+    description:
+      'Filter by one or more category/specialty tags. Accepts a comma-separated list (?categories=SKIN_FADES,BRAIDS) or repeated params. Returns barbers matching ANY of the selected categories.',
+    example: [BarberCategoryTag.SKIN_FADES, BarberCategoryTag.BRAIDS],
+  })
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (value === undefined || value === null) return undefined;
+    const raw = Array.isArray(value) ? value : String(value).split(',');
+    const cleaned = raw.map((v) => String(v).trim()).filter((v) => v.length > 0);
+    return cleaned.length > 0 ? cleaned : undefined;
+  })
+  @IsArray()
+  @ArrayUnique()
+  @IsEnum(BarberCategoryTag, { each: true })
+  categories?: BarberCategoryTag[];
 
   @ApiPropertyOptional({ default: 1, minimum: 1 })
   @IsOptional()

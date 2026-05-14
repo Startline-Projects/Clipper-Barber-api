@@ -52,7 +52,9 @@ import {
   UpdateNoShowChargeDto,
 } from './dto/update-no-show-charge.dto';
 import { UpdateBarberProfileDto } from './dto/update-barber-profile.dto';
+import { UpdateBarberCategoriesDto } from './dto/update-barber-categories.dto';
 import { BarberProfileResponseDto } from '../auth/dto/responses/barber-profile.response.dto';
+import { BarberCategoryTag } from '../../common/enums/barber-category-tag.enum';
 
 @ApiTags('Barbers')
 @Controller('barbers')
@@ -191,6 +193,12 @@ export class BarberProfileController {
         longitude: { type: 'number' },
         bio: { type: 'string', maxLength: 500 },
         instagramHandle: { type: 'string', maxLength: 50 },
+        categories: {
+          type: 'array',
+          items: { type: 'string', enum: Object.values(BarberCategoryTag) },
+          description:
+            'Category/specialty tags. Fully replaces the current selection; send [] to clear.',
+        },
       },
     },
   })
@@ -201,6 +209,21 @@ export class BarberProfileController {
     @UploadedFile() photo?: Express.Multer.File
   ): Promise<BarberProfileResponseDto> {
     return this.barbersService.updateProfile(user.sub, dto, photo);
+  }
+
+  @Patch('categories')
+  @ApiOperation({
+    summary: 'Update the authenticated barber’s category/specialty tags',
+    description:
+      'Dedicated edit endpoint for the categories selected in signup step 4. The supplied array fully replaces the current selection — add, remove, or edit the whole set in one call. Sending [] clears all categories. Returns the full barber profile.',
+  })
+  @ApiBody({ type: UpdateBarberCategoriesDto })
+  @ApiResponse({ status: 200, type: BarberProfileResponseDto })
+  public async updateCategories(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Body() dto: UpdateBarberCategoriesDto
+  ): Promise<BarberProfileResponseDto> {
+    return this.barbersService.updateCategories(user.sub, dto);
   }
 }
 
