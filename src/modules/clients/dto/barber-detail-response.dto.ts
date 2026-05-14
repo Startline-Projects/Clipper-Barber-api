@@ -1,6 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { ServiceType } from '../../barbers/services/dto/create-barber-service.dto';
 import { BarberDistanceDto } from './barber-list-item.dto';
+import { BarberCategoryTag } from '../../../common/enums/barber-category-tag.enum';
 
 export class BarberWorkingDayDto {
   @ApiProperty({ example: 0, description: '0 = Sunday, 6 = Saturday' })
@@ -24,6 +25,13 @@ export class BarberInfoDto {
   @ApiProperty({ nullable: true, type: String }) phone: string | null;
   @ApiProperty({ type: [BarberWorkingDayDto] }) workingHours: BarberWorkingDayDto[];
   @ApiProperty() recurringAvailable: boolean;
+  @ApiProperty({
+    enum: BarberCategoryTag,
+    isArray: true,
+    description: 'Barber category/specialty tags. Empty array when none selected.',
+    example: [BarberCategoryTag.AFRO_HAIR_SPECIALIST, BarberCategoryTag.BRAIDS],
+  })
+  categories: BarberCategoryTag[];
 }
 
 export class BarberDetailServiceDto {

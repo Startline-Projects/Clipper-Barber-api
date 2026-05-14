@@ -1,4 +1,7 @@
 import {
+  ArrayUnique,
+  IsArray,
+  IsEnum,
   IsLatitude,
   IsLongitude,
   IsOptional,
@@ -9,6 +12,7 @@ import {
 import { Type } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import messages from '../../../common/messages.json';
+import { BarberCategoryTag } from '../../../common/enums/barber-category-tag.enum';
 
 export class UpdateBarberProfileDto {
   @ApiPropertyOptional({ example: 'John Doe', maxLength: 100 })
@@ -74,4 +78,17 @@ export class UpdateBarberProfileDto {
   @Matches(/^[a-zA-Z0-9._]+$/, { message: messages.validation.INSTAGRAM_INVALID })
   @MaxLength(50)
   instagramHandle?: string;
+
+  @ApiPropertyOptional({
+    enum: BarberCategoryTag,
+    isArray: true,
+    example: [BarberCategoryTag.SKIN_FADES, BarberCategoryTag.CURLY_HAIR_SPECIALIST],
+    description:
+      'Category/specialty tags. The supplied array fully replaces the current selection; send [] to clear.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @IsEnum(BarberCategoryTag, { each: true })
+  categories?: BarberCategoryTag[];
 }

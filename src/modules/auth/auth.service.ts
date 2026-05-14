@@ -11,6 +11,8 @@ import { SupabaseService, SupabaseUserPayload } from '../supabase/supabase.servi
 import { BarberStep1Dto } from './dto/barber-step1.dto';
 import { BarberStep2Dto } from './dto/barber-step2.dto';
 import { BarberStep3Dto } from './dto/barber-step3.dto';
+import { BarberSignupCategoriesDto } from './dto/barber-step4.dto';
+import { normalizeCategories } from '../../common/enums/barber-category-tag.enum';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ClientRegisterDto } from './dto/client-register.dto';
 import { LoginDto } from './dto/login.dto';
@@ -119,6 +121,33 @@ export class AuthService {
     await this.client.auth.admin.updateUserById(userId, {
       user_metadata: { onboarding_step: 3, onboarding_complete: true },
     });
+
+    return this.projectBarberProfile(data as Record<string, unknown>);
+  }
+
+  /**
+   * Barber signup step 4 — persist optional category/specialty tags.
+   * Skippable: an omitted `categories` field clears nothing and saves an
+   * empty selection. The supplied array fully replaces any existing tags.
+   * Onboarding state is intentionally left untouched (step 3 already
+   * completes onboarding).
+   */
+  public async updateBarberStep4(
+    userId: string,
+    dto: BarberSignupCategoriesDto
+  ): Promise<BarberProfileResponseDto> {
+    const categories = normalizeCategories(dto.categories);
+
+    const { data, error } = await this.client
+      .from('barbers')
+      .update({ categories })
+      .eq('user_id', userId)
+      .select('*')
+      .single();
+
+    if (error || !data) {
+      throw new InternalServerErrorException(messages.barber.PROFILE_UPDATE_FAILED);
+    }
 
     return this.projectBarberProfile(data as Record<string, unknown>);
   }

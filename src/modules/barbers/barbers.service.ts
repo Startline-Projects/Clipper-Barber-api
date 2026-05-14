@@ -14,15 +14,17 @@ import {
   projectBookingServices,
   ProjectedBookingService,
 } from '../bookings/util/booking-services-projection';
-import {
-  BARBER_DEFAULT_TIMEZONE,
-  projectBookingTime,
-} from '../bookings/util/timezone.util';
+import { BARBER_DEFAULT_TIMEZONE, projectBookingTime } from '../bookings/util/timezone.util';
 import { NoShowsService } from '../no-shows/no-shows.service';
 import { ConnectService } from '../payments/connect.service';
 import { ConnectRequired } from '../payments/payments.exceptions';
 import { UpdateBarberProfileDto } from './dto/update-barber-profile.dto';
+import { UpdateBarberCategoriesDto } from './dto/update-barber-categories.dto';
 import { BarberProfileResponseDto } from '../auth/dto/responses/barber-profile.response.dto';
+import {
+  BarberCategoryTag,
+  normalizeCategories,
+} from '../../common/enums/barber-category-tag.enum';
 import messages from '../../common/messages.json';
 import {
   BookingStatusDto,
@@ -202,9 +204,7 @@ export class BarbersService {
     const hasMore = rows.length > limit;
     const pageRows = hasMore ? rows.slice(0, limit) : rows;
 
-    const servicesByBooking = await this.loadBookingServicesByBookingIds(
-      pageRows.map((r) => r.id)
-    );
+    const servicesByBooking = await this.loadBookingServicesByBookingIds(pageRows.map((r) => r.id));
 
     // Collect every service id referenced (primary FK on bookings + each
     // booking_services row) so we can hydrate names/durations in one query.
@@ -214,7 +214,10 @@ export class BarbersService {
       for (const s of list) allServiceIds.add(s.barber_service_id);
 
     const [{ clientMap, serviceMap }, barberTz] = await Promise.all([
-      this.loadRelated(pageRows.map((r) => r.client_id), Array.from(allServiceIds)),
+      this.loadRelated(
+        pageRows.map((r) => r.client_id),
+        Array.from(allServiceIds)
+      ),
       this.fetchBarberTimezone(barberId),
     ]);
 
@@ -540,13 +543,21 @@ export class BarbersService {
 
   private async loadBarberNoShowConfig(
     barberAuthId: string
-  ): Promise<{ no_show_charge_enabled: boolean; no_show_charge_amount_usd: number | string | null } | null> {
+  ): Promise<{
+    no_show_charge_enabled: boolean;
+    no_show_charge_amount_usd: number | string | null;
+  } | null> {
     const { data } = await this.db
       .from('barbers')
       .select('no_show_charge_enabled, no_show_charge_amount_usd')
       .eq('user_id', barberAuthId)
       .maybeSingle();
-    return (data as { no_show_charge_enabled: boolean; no_show_charge_amount_usd: number | string | null } | null) ?? null;
+    return (
+      (data as {
+        no_show_charge_enabled: boolean;
+        no_show_charge_amount_usd: number | string | null;
+      } | null) ?? null
+    );
   }
 
   // ────────────────────────────────────────────────────────────
@@ -630,9 +641,25 @@ export class BarbersService {
     barberId: string,
     enabled: boolean
   ): Promise<InHouseServicesResponseDto> {
+    // The in-house flag is mirrored into the categories array as the
+    // IN_HOUSE_SERVICES tag so the boolean and the categories system never
+    // drift apart. Read the current categories first to add/remove the tag.
+    const { data: current, error: readError } = await this.db
+      .from('barbers')
+      .select('categories')
+      .eq('user_id', barberId)
+      .maybeSingle();
+
+    if (readError) throw new InternalServerErrorException('Failed to load barber categories');
+    if (!current) throw new NotFoundException('Barber profile not found');
+
+    const existing = normalizeCategories(current.categories as string[] | null);
+    const withoutTag = existing.filter((c) => c !== BarberCategoryTag.IN_HOUSE_SERVICES);
+    const categories = enabled ? [...withoutTag, BarberCategoryTag.IN_HOUSE_SERVICES] : withoutTag;
+
     const { data, error } = await this.db
       .from('barbers')
-      .update({ in_house_services: enabled })
+      .update({ in_house_services: enabled, categories })
       .eq('user_id', barberId)
       .select('in_house_services')
       .maybeSingle();
@@ -641,6 +668,32 @@ export class BarbersService {
     if (!data) throw new NotFoundException('Barber profile not found');
 
     return { inHouseServices: data.in_house_services as boolean };
+  }
+
+  /**
+   * Edit-profile helper: fully replace the barber's category tags. The
+   * IN_HOUSE_SERVICES tag is mirrored back into the legacy boolean.
+   */
+  public async updateCategories(
+    barberId: string,
+    dto: UpdateBarberCategoriesDto
+  ): Promise<BarberProfileResponseDto> {
+    const categories = normalizeCategories(dto.categories);
+
+    const { data, error } = await this.db
+      .from('barbers')
+      .update({
+        categories,
+        in_house_services: categories.includes(BarberCategoryTag.IN_HOUSE_SERVICES),
+      })
+      .eq('user_id', barberId)
+      .select('*')
+      .maybeSingle();
+
+    if (error) throw new InternalServerErrorException(messages.barber.PROFILE_UPDATE_FAILED);
+    if (!data) throw new NotFoundException('Barber profile not found');
+
+    return this.projectCanonicalId(data) as unknown as BarberProfileResponseDto;
   }
 
   // ────────────────────────────────────────────────────────────
@@ -678,6 +731,12 @@ export class BarbersService {
     if (dto.longitude !== undefined) patch.longitude = dto.longitude;
     if (dto.bio !== undefined) patch.bio = dto.bio;
     if (dto.instagramHandle !== undefined) patch.instagram_handle = dto.instagramHandle;
+    if (dto.categories !== undefined) {
+      const categories = normalizeCategories(dto.categories);
+      patch.categories = categories;
+      // Keep the legacy boolean consistent with the categories system.
+      patch.in_house_services = categories.includes(BarberCategoryTag.IN_HOUSE_SERVICES);
+    }
 
     if (photo) {
       patch.profile_photo_url = await this.uploadProfilePhoto(barberId, photo);
@@ -706,10 +765,7 @@ export class BarbersService {
     return this.projectCanonicalId(data) as unknown as BarberProfileResponseDto;
   }
 
-  private async uploadProfilePhoto(
-    barberId: string,
-    photo: Express.Multer.File
-  ): Promise<string> {
+  private async uploadProfilePhoto(barberId: string, photo: Express.Multer.File): Promise<string> {
     const ext = photo.mimetype.split('/')[1] ?? 'jpg';
     const path = `profiles/${barberId}/profile.${ext}`;
 
@@ -831,9 +887,7 @@ export class BarbersService {
 
     const { data, error } = await this.db
       .from('booking_services')
-      .select(
-        'booking_id, barber_service_id, booking_type, duration_minutes, sort_order'
-      )
+      .select('booking_id, barber_service_id, booking_type, duration_minutes, sort_order')
       .in('booking_id', bookingIds)
       .order('sort_order', { ascending: true });
 
