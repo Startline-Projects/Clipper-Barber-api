@@ -68,7 +68,7 @@ export class SubscriptionsService {
     });
 
     const priceId = this.stripeService.priceIdForPlan(dto.plan);
-    const subscription = await this.stripe.subscriptions.create({
+    let subscription = await this.stripe.subscriptions.create({
       customer: customerId,
       items: [{ price: priceId }],
       payment_behavior: 'default_incomplete',
@@ -80,14 +80,45 @@ export class SubscriptionsService {
       metadata: { client_user_id: authUserId, plan: dto.plan },
     });
 
-    // Mirror locally. Status stays 'inactive' until customer.subscription.created /
-    // .updated webhook flips it; the SCA confirmation roundtrip is what gates that.
+    // Attempt immediate payment on the latest invoice using the attached PM.
+    // For non-SCA cards this flips the sub to 'active' synchronously so the
+    // GET /subscriptions/me right after create sees the real state, without
+    // waiting for the customer.subscription.updated webhook. SCA cards will
+    // still need clientSecret confirmation on-device.
+    const invoiceId =
+      typeof subscription.latest_invoice === 'string'
+        ? subscription.latest_invoice
+        : subscription.latest_invoice?.id;
+    if (invoiceId) {
+      try {
+        await this.stripe.invoices.pay(invoiceId, { payment_method: dto.paymentMethodId });
+        subscription = await this.stripe.subscriptions.retrieve(subscription.id, {
+          expand: ['latest_invoice'],
+        });
+      } catch {
+        // Payment failed (e.g. SCA required, declined). Leave the sub in its
+        // incomplete state; the clientSecret in the response lets the device
+        // finish confirmation, and the webhook will reconcile from there.
+      }
+    }
+
+    const mirroredStatus = this.mapSubscriptionStatus(
+      subscription.status,
+      subscription.cancel_at_period_end === true
+    );
+    const periodEndUnix = subscription.items.data[0]?.current_period_end ?? null;
+    const periodEndIso = periodEndUnix ? new Date(periodEndUnix * 1000).toISOString() : null;
+
+    // Synchronous mirror. The webhook will reconfirm shortly with the same
+    // values — that's fine, the upsert is idempotent.
     const { error } = await this.db
       .from('clients')
       .update({
         stripe_subscription_id: subscription.id,
         stripe_payment_method_id: dto.paymentMethodId,
         subscription_plan: dto.plan,
+        subscription_status: mirroredStatus,
+        subscription_expires_at: periodEndIso,
         subscription_cancel_at_period_end: false,
       })
       .eq('user_id', authUserId);
@@ -98,9 +129,22 @@ export class SubscriptionsService {
 
     return {
       subscriptionId: subscription.id,
-      status: client.subscription_status,
+      status: mirroredStatus,
       clientSecret: this.extractClientSecret(subscription),
     };
+  }
+
+  private mapSubscriptionStatus(
+    stripeStatus: Stripe.Subscription.Status,
+    cancelAtPeriodEnd: boolean
+  ): SubscriptionStatusDto {
+    if (stripeStatus === 'active' || stripeStatus === 'trialing') return 'active';
+    if (stripeStatus === 'past_due' || stripeStatus === 'unpaid') return 'past_due';
+    if (stripeStatus === 'canceled') return 'cancelled';
+    if (stripeStatus === 'incomplete' || stripeStatus === 'incomplete_expired') {
+      return cancelAtPeriodEnd ? 'cancelled' : 'inactive';
+    }
+    return 'inactive';
   }
 
   public async getSubscriptionState(authUserId: string): Promise<SubscriptionStateResponseDto> {
