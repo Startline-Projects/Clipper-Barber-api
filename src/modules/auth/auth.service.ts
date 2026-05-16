@@ -166,10 +166,13 @@ export class AuthService {
       throw new ConflictException(messages.client.USERNAME_TAKEN);
     }
 
+    // email_confirm: true so signInWithPassword succeeds immediately —
+    // signup must not be blocked on email transport. A best-effort
+    // confirmation email is still sent below for users who want to verify.
     const { data: userData, error: createError } = await this.client.auth.admin.createUser({
       email: dto.email,
       password: dto.password,
-      email_confirm: false,
+      email_confirm: true,
       user_metadata: { role: 'client', username: dto.username },
     });
 
@@ -188,8 +191,9 @@ export class AuthService {
       throw new BadRequestException(insertError.message);
     }
 
+    const tokens = await this.signInAndReturnTokens(dto.email, dto.password);
     await this.sendSignupConfirmation(dto.email);
-    return this.signInAndReturnTokens(dto.email, dto.password);
+    return tokens;
   }
 
   /**
