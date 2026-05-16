@@ -13,10 +13,13 @@ import {
   ActivePlanResponseDto,
   CancelSubscriptionResponseDto,
   CreateSubscriptionResponseDto,
+  ReactivateSubscriptionResponseDto,
   SubscriptionStateResponseDto,
   SubscriptionStatusDto,
 } from './dto/subscription-response.dto';
 import { PlanDowngradeNotAllowed } from './payments.exceptions';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationTypeDto } from '../notifications/dto/notification.dto';
 
 interface ClientSubscriptionRow {
   user_id: string;
@@ -36,7 +39,8 @@ const CLIENT_SUBSCRIPTION_COLUMNS =
 export class SubscriptionsService {
   constructor(
     private readonly supabaseService: SupabaseService,
-    private readonly stripeService: StripeService
+    private readonly stripeService: StripeService,
+    private readonly notificationsService: NotificationsService
   ) {}
 
   private get db() {
@@ -142,18 +146,24 @@ export class SubscriptionsService {
       throw new InternalServerErrorException('Subscription has no items — cannot switch plan');
     }
 
-    await this.stripe.subscriptions.update(client.stripe_subscription_id, {
+    const updated = await this.stripe.subscriptions.update(client.stripe_subscription_id, {
       items: [{ id: itemId, price: this.stripeService.priceYearly }],
       proration_behavior: 'always_invoice',
       metadata: { client_user_id: authUserId, plan: 'yearly' },
     });
 
-    // The webhook (customer.subscription.updated) is the source of truth for
-    // current_period_end after proration, but mirror plan immediately so the
-    // client UI shows the new plan without waiting for the webhook.
+    // Mirror plan and the new period_end immediately so the response reflects
+    // the post-proration state without waiting for the customer.subscription.updated
+    // webhook race. The webhook will reconfirm shortly.
+    const periodEndUnix = updated.items.data[0]?.current_period_end ?? null;
+    const periodEndIso = periodEndUnix ? new Date(periodEndUnix * 1000).toISOString() : null;
+
+    const mirror: Record<string, unknown> = { subscription_plan: 'yearly' };
+    if (periodEndIso) mirror.subscription_expires_at = periodEndIso;
+
     const { error } = await this.db
       .from('clients')
-      .update({ subscription_plan: 'yearly' })
+      .update(mirror)
       .eq('user_id', authUserId);
 
     if (error) {
@@ -161,6 +171,40 @@ export class SubscriptionsService {
     }
 
     return this.getSubscriptionState(authUserId);
+  }
+
+  public async reactivateSubscription(
+    authUserId: string
+  ): Promise<ReactivateSubscriptionResponseDto> {
+    const client = await this.loadClient(authUserId);
+    if (!client.stripe_subscription_id) {
+      throw new NotFoundException('No subscription to reactivate.');
+    }
+    if (!client.subscription_cancel_at_period_end) {
+      throw new BadRequestException('Subscription is not scheduled for cancellation.');
+    }
+
+    // Clear the pending cancellation on Stripe — keeps the same subscription,
+    // no new invoice, no proration. Supabase mirror updated below.
+    await this.stripe.subscriptions.update(client.stripe_subscription_id, {
+      cancel_at_period_end: false,
+    });
+
+    const { error } = await this.db
+      .from('clients')
+      .update({ subscription_cancel_at_period_end: false })
+      .eq('user_id', authUserId);
+
+    if (error) {
+      throw new InternalServerErrorException('Failed to mirror reactivation');
+    }
+
+    return {
+      status: client.subscription_status,
+      cancelAtPeriodEnd: false,
+      plan: client.subscription_plan as SubscriptionPlanDto | null,
+      currentPeriodEnd: client.subscription_expires_at,
+    };
   }
 
   public async cancelSubscription(authUserId: string): Promise<CancelSubscriptionResponseDto> {
@@ -183,6 +227,13 @@ export class SubscriptionsService {
     if (error) {
       throw new InternalServerErrorException('Failed to mirror cancellation');
     }
+
+    // Best-effort push. NotificationsService swallows its own errors, so the
+    // cancel response is never blocked or rolled back by notification failure.
+    void this.notificationsService.createAndSendSubscriptionNotification(
+      authUserId,
+      NotificationTypeDto.SUBSCRIPTION_CANCEL_SCHEDULED
+    );
 
     return {
       status: client.subscription_status,

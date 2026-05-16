@@ -25,8 +25,10 @@ import { BarberStep3Dto } from './dto/barber-step3.dto';
 import { BarberSignupCategoriesDto } from './dto/barber-step4.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ClientRegisterDto } from './dto/client-register.dto';
+import { GoogleLoginDto } from './dto/google-login.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
+import { ResendVerificationDto, VerifyEmailDto } from './dto/verify-email.dto';
 import { TokensResponseDto } from './dto/responses/tokens.response.dto';
 import { LoginResponseDto } from './dto/responses/login.response.dto';
 import { BarberProfileResponseDto } from './dto/responses/barber-profile.response.dto';
@@ -154,6 +156,42 @@ export class AuthController {
   @ApiResponse({ status: 201, description: 'Login successful', type: LoginResponseDto })
   public login(@Body() dto: LoginDto): Promise<LoginResponseDto> {
     return this.authService.login(dto);
+  }
+
+  @Post('google')
+  @ApiOperation({
+    summary: 'Client Google sign-in / signup',
+    description:
+      'Client-only. Mobile app obtains a Google id_token via native Google Sign-In and posts it here. Server exchanges it with Supabase, provisions a `clients` row on first sign-in, and returns the same shape as POST /auth/login for clients. Email is considered verified (Google has attested it).',
+  })
+  @ApiBody({ type: GoogleLoginDto })
+  @ApiResponse({ status: 201, description: 'Google login successful', type: LoginResponseDto })
+  public googleLogin(@Body() dto: GoogleLoginDto): Promise<LoginResponseDto> {
+    return this.authService.googleLogin(dto);
+  }
+
+  @Post('verify-email')
+  @ApiOperation({
+    summary: 'Verify email using OTP token from signup confirmation email',
+    description:
+      'Accepts the `token_hash` parameter from the Supabase confirmation email link. Works for both clients and barbers.',
+  })
+  @ApiBody({ type: VerifyEmailDto })
+  @ApiResponse({ status: 201, description: 'Email verified', type: SuccessResponseDto })
+  public verifyEmail(@Body() dto: VerifyEmailDto): Promise<SuccessResponseDto> {
+    return this.authService.verifyEmail(dto);
+  }
+
+  @Post('resend-verification')
+  @ApiOperation({
+    summary: 'Resend the signup verification email',
+    description:
+      'Always returns success regardless of whether the email exists, to prevent enumeration.',
+  })
+  @ApiBody({ type: ResendVerificationDto })
+  @ApiResponse({ status: 201, description: 'Verification email dispatched', type: SuccessResponseDto })
+  public resendVerification(@Body() dto: ResendVerificationDto): Promise<SuccessResponseDto> {
+    return this.authService.resendVerification(dto);
   }
 
   @Post('refresh')

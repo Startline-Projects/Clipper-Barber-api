@@ -15,7 +15,9 @@ import { BarberSignupCategoriesDto } from './dto/barber-step4.dto';
 import { normalizeCategories } from '../../common/enums/barber-category-tag.enum';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ClientRegisterDto } from './dto/client-register.dto';
+import { GoogleLoginDto } from './dto/google-login.dto';
 import { LoginDto } from './dto/login.dto';
+import { ResendVerificationDto, VerifyEmailDto } from './dto/verify-email.dto';
 import { TokensResponseDto } from './dto/responses/tokens.response.dto';
 import { LoginResponseDto } from './dto/responses/login.response.dto';
 import { BarberProfileResponseDto } from './dto/responses/barber-profile.response.dto';
@@ -34,7 +36,7 @@ export class AuthService {
     const { data: userData, error: createError } = await this.client.auth.admin.createUser({
       email: dto.email,
       password: dto.password,
-      email_confirm: true,
+      email_confirm: false,
       user_metadata: {
         role: 'barber',
         full_name: dto.fullName,
@@ -59,6 +61,7 @@ export class AuthService {
       throw new BadRequestException(insertError.message);
     }
 
+    await this.sendSignupConfirmation(dto.email);
     return this.signInAndReturnTokens(dto.email, dto.password);
   }
 
@@ -166,7 +169,7 @@ export class AuthService {
     const { data: userData, error: createError } = await this.client.auth.admin.createUser({
       email: dto.email,
       password: dto.password,
-      email_confirm: true,
+      email_confirm: false,
       user_metadata: { role: 'client', username: dto.username },
     });
 
@@ -185,7 +188,113 @@ export class AuthService {
       throw new BadRequestException(insertError.message);
     }
 
+    await this.sendSignupConfirmation(dto.email);
     return this.signInAndReturnTokens(dto.email, dto.password);
+  }
+
+  /**
+   * Google sign-in for clients only.
+   *
+   * The mobile app obtains a Google id_token natively and posts it here.
+   * We exchange it for a Supabase session via signInWithIdToken; Supabase
+   * either matches an existing auth user by email or provisions a new one
+   * with email_verified=true (Google has already attested the email).
+   *
+   * If the user is new we also create the matching `clients` row.
+   * Barbers cannot sign in with Google — the barber flow requires the
+   * multi-step onboarding, so we reject if the email already belongs to a
+   * barber.
+   */
+  public async googleLogin(dto: GoogleLoginDto): Promise<LoginResponseDto> {
+    const anonClient = this.supabaseService.getAuthClient();
+    const { data, error } = await anonClient.auth.signInWithIdToken({
+      provider: 'google',
+      token: dto.idToken,
+      access_token: dto.accessToken,
+    });
+
+    if (error || !data.session || !data.user) {
+      throw new UnauthorizedException(messages.auth.GOOGLE_INVALID_TOKEN);
+    }
+
+    const user = data.user;
+    const existingRole = (user.user_metadata?.role as string | undefined) ?? undefined;
+
+    if (existingRole === 'barber') {
+      throw new ConflictException(messages.auth.GOOGLE_ROLE_RESERVED);
+    }
+
+    if (!existingRole) {
+      const username = await this.deriveUniqueUsername(dto.username, user.email ?? '');
+
+      await this.client.auth.admin.updateUserById(user.id, {
+        user_metadata: { ...user.user_metadata, role: 'client', username },
+      });
+
+      const { error: insertError } = await this.client.from('clients').insert({
+        user_id: user.id,
+        username,
+        name: (user.user_metadata?.full_name as string | undefined) ?? username,
+      });
+
+      if (insertError && insertError.code !== '23505') {
+        throw new InternalServerErrorException(insertError.message);
+      }
+    }
+
+    const payload = await this.supabaseService.getUserFromToken(data.session.access_token);
+    const tokens: TokensResponseDto = {
+      accessToken: data.session.access_token,
+      refreshToken: data.session.refresh_token,
+    };
+    return this.buildClientLoginResponse(tokens, payload);
+  }
+
+  public async verifyEmail(dto: VerifyEmailDto): Promise<SuccessResponseDto> {
+    const { error } = await this.client.auth.verifyOtp({
+      token_hash: dto.token,
+      type: dto.type ?? 'signup',
+    });
+
+    if (error) {
+      throw new UnauthorizedException(messages.auth.EMAIL_VERIFY_FAILED);
+    }
+
+    return { success: true };
+  }
+
+  /**
+   * Re-sends the signup confirmation email. Always returns success — we
+   * don't reveal whether the email exists, mirroring forgotPassword.
+   */
+  public async resendVerification(dto: ResendVerificationDto): Promise<SuccessResponseDto> {
+    const anonClient = this.supabaseService.getAuthClient();
+    await anonClient.auth.resend({ type: 'signup', email: dto.email });
+    return { success: true };
+  }
+
+  private async sendSignupConfirmation(email: string): Promise<void> {
+    const anonClient = this.supabaseService.getAuthClient();
+    // Best-effort — never block account creation on email transport.
+    await anonClient.auth.resend({ type: 'signup', email }).catch(() => undefined);
+  }
+
+  private async deriveUniqueUsername(preferred: string | undefined, email: string): Promise<string> {
+    const base = (preferred ?? email.split('@')[0] ?? 'user')
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, '_')
+      .slice(0, 24) || 'user';
+
+    for (let i = 0; i < 5; i++) {
+      const candidate = i === 0 ? base : `${base}_${Math.floor(Math.random() * 10000)}`;
+      const { data } = await this.client
+        .from('clients')
+        .select('id')
+        .eq('username', candidate)
+        .maybeSingle();
+      if (!data) return candidate;
+    }
+    return `${base}_${Date.now().toString(36)}`;
   }
 
   public async login(dto: LoginDto): Promise<LoginResponseDto> {

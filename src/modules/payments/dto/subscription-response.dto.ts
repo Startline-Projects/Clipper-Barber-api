@@ -65,6 +65,24 @@ export class ActivePlanResponseDto {
   cancelAtPeriodEnd: boolean;
 }
 
+export class ReactivateSubscriptionResponseDto {
+  @ApiProperty({ example: 'active' })
+  status: SubscriptionStatusDto;
+
+  @ApiProperty({
+    example: false,
+    description:
+      'False once Stripe has cleared cancel_at_period_end on the existing subscription.',
+  })
+  cancelAtPeriodEnd: boolean;
+
+  @ApiProperty({ enum: SubscriptionPlanDto, nullable: true })
+  plan: SubscriptionPlanDto | null;
+
+  @ApiProperty({ example: '2026-05-27T00:00:00.000Z', nullable: true })
+  currentPeriodEnd: string | null;
+}
+
 export class CancelSubscriptionResponseDto {
   @ApiProperty({ example: 'active' })
   status: SubscriptionStatusDto;

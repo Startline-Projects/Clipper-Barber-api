@@ -1281,17 +1281,18 @@ export class RecurringBookingsService {
     await this.generator.cancelPausedBookings(recurringBookingId);
 
     const updatedRow = updated as RecurringRow;
-    // Spec: only the client pausing/cancelling fires a barber-facing notification.
-    // When the barber initiates the action themselves there is no counterpart event.
-    if (role === 'client') {
-      void this.notificationsService.createAndSendNotification({
-        recipientId: updatedRow.barber_id,
-        recipientType: 'barber',
-        senderId: actorAuthId,
-        type: NotificationTypeDto.RECURRING_PAUSED,
-        recurringBookingId: updatedRow.id,
-      });
-    }
+    // Notify the other party regardless of who initiated the pause.
+    const pauseRecipientId =
+      role === 'client' ? updatedRow.barber_id : updatedRow.client_id;
+    const pauseRecipientType: 'client' | 'barber' =
+      role === 'client' ? 'barber' : 'client';
+    void this.notificationsService.createAndSendNotification({
+      recipientId: pauseRecipientId,
+      recipientType: pauseRecipientType,
+      senderId: actorAuthId,
+      type: NotificationTypeDto.RECURRING_PAUSED,
+      recurringBookingId: updatedRow.id,
+    });
 
     return { recurringBooking: await this.buildRecurringBookingDto(updatedRow) };
   }
@@ -1351,7 +1352,21 @@ export class RecurringBookingsService {
       `[recurring.resume] id=${recurringBookingId} restored=${restored} conflicted=${conflicted}`,
     );
 
-    return { recurringBooking: await this.buildRecurringBookingDto(updated as RecurringRow) };
+    const updatedRow = updated as RecurringRow;
+    // Notify the other party regardless of who resumed.
+    const resumeRecipientId =
+      role === 'client' ? updatedRow.barber_id : updatedRow.client_id;
+    const resumeRecipientType: 'client' | 'barber' =
+      role === 'client' ? 'barber' : 'client';
+    void this.notificationsService.createAndSendNotification({
+      recipientId: resumeRecipientId,
+      recipientType: resumeRecipientType,
+      senderId: actorAuthId,
+      type: NotificationTypeDto.RECURRING_RESUMED,
+      recurringBookingId: updatedRow.id,
+    });
+
+    return { recurringBooking: await this.buildRecurringBookingDto(updatedRow) };
   }
 
   public async cancelRecurringBooking(
@@ -1562,12 +1577,14 @@ export class RecurringBookingsService {
   // Lightweight mapping from a recurring_bookings row + related barber/service/client
   // lookups into the public RecurringBookingDto. Used by R6, R7, R11, R12.
   protected async buildRecurringBookingDto(row: RecurringRow): Promise<RecurringBookingDto> {
-    const [barberName, clientName, serviceLite, childServices] = await Promise.all([
-      this.fetchBarberName(row.barber_id),
-      this.fetchClientName(row.client_id),
+    const [barberInfo, clientInfo, serviceLite, childServices] = await Promise.all([
+      this.fetchBarberNameAndPhoto(row.barber_id),
+      this.fetchClientNameAndPhoto(row.client_id),
       this.fetchServiceLite(row.barber_service_id),
       this.buildRecurringServiceList(row.id),
     ]);
+    const barberName = barberInfo.name;
+    const clientName = clientInfo.name;
 
     const totalDurationMinutes =
       row.duration_minutes ??
@@ -1590,7 +1607,9 @@ export class RecurringBookingsService {
       services: childServices,
       totalDurationMinutes,
       barber: { id: row.barber_id, name: barberName },
+      barberProfilePhotoUrl: barberInfo.profilePhotoUrl,
       client: { id: row.client_id, name: clientName },
+      clientProfilePhotoUrl: clientInfo.profilePhotoUrl,
       createdAt: new Date(row.created_at).toISOString(),
       barberAcceptedAt: row.barber_accepted_at
         ? new Date(row.barber_accepted_at).toISOString()
@@ -1659,6 +1678,20 @@ export class RecurringBookingsService {
       .eq('user_id', clientId)
       .maybeSingle();
     return ((data?.name as string | undefined) ?? 'Unknown');
+  }
+
+  private async fetchClientNameAndPhoto(
+    clientId: string,
+  ): Promise<{ name: string; profilePhotoUrl: string | null }> {
+    const { data } = await this.db
+      .from('clients')
+      .select('name, profile_photo_url')
+      .eq('user_id', clientId)
+      .maybeSingle();
+    return {
+      name: (data?.name as string | undefined) ?? 'Unknown',
+      profilePhotoUrl: (data?.profile_photo_url as string | null) ?? null,
+    };
   }
 
   private async fetchServiceLite(

@@ -7,7 +7,14 @@
     "ROLE_MISMATCH": "Role mismatch — wrong app for this account",
     "INVALID_REFRESH_TOKEN": "Invalid or expired refresh token",
     "INVALID_RESET_TOKEN": "Invalid or expired reset token",
-    "ACCOUNT_SIGNIN_FAILED": "Account created but failed to sign in"
+    "ACCOUNT_SIGNIN_FAILED": "Account created but failed to sign in",
+    "GOOGLE_SIGNIN_FAILED": "Google sign-in failed",
+    "GOOGLE_INVALID_TOKEN": "Invalid Google id_token",
+    "GOOGLE_ROLE_RESERVED": "This email is already registered as a barber and cannot sign in with Google as a client",
+    "EMAIL_VERIFY_FAILED": "Invalid or expired verification token",
+    "EMAIL_ALREADY_VERIFIED": "Email is already verified",
+    "EMAIL_RESEND_FAILED": "Could not resend verification email",
+    "EMAIL_NOT_FOUND": "No account found for this email"
   },
   "barber": {
     "PROFILE_UPDATE_FAILED": "Failed to update barber profile — profile row may not exist yet",

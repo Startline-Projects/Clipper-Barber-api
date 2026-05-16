@@ -2,6 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { Stripe } from 'stripe/cjs/stripe.core';
 import { SupabaseService } from '../supabase/supabase.service';
 import { StripeService } from './stripe.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationTypeDto } from '../notifications/dto/notification.dto';
 
 interface InsertEventResult {
   duplicate: boolean;
@@ -20,7 +22,8 @@ export class WebhooksService {
 
   constructor(
     private readonly supabaseService: SupabaseService,
-    private readonly stripeService: StripeService
+    private readonly stripeService: StripeService,
+    private readonly notificationsService: NotificationsService
   ) {}
 
   private get db() {
@@ -164,6 +167,20 @@ export class WebhooksService {
     const periodEndUnix = sub.items.data[0]?.current_period_end ?? null;
     const periodEndIso = periodEndUnix ? new Date(periodEndUnix * 1000).toISOString() : null;
 
+    // Read prior state so we can detect transitions and emit one-shot
+    // activation/reactivation pushes once per status change.
+    const { data: prior } = await this.db
+      .from('clients')
+      .select('subscription_status')
+      .eq('user_id', clientUserId)
+      .maybeSingle();
+    const priorStatus = prior?.subscription_status as
+      | 'inactive'
+      | 'active'
+      | 'past_due'
+      | 'cancelled'
+      | undefined;
+
     const { error } = await this.db
       .from('clients')
       .update({
@@ -177,6 +194,14 @@ export class WebhooksService {
 
     if (error) {
       throw new Error(`Failed to mirror subscription ${sub.id}: ${error.message}`);
+    }
+
+    if (status === 'active' && priorStatus !== 'active') {
+      const type =
+        priorStatus === 'past_due'
+          ? NotificationTypeDto.SUBSCRIPTION_REACTIVATED
+          : NotificationTypeDto.SUBSCRIPTION_ACTIVATED;
+      void this.notificationsService.createAndSendSubscriptionNotification(clientUserId, type);
     }
   }
 
@@ -194,6 +219,11 @@ export class WebhooksService {
     if (error) {
       throw new Error(`Failed to mark subscription cancelled for ${sub.id}: ${error.message}`);
     }
+
+    void this.notificationsService.createAndSendSubscriptionNotification(
+      clientUserId,
+      NotificationTypeDto.SUBSCRIPTION_CANCELLED
+    );
   }
 
   private async handleInvoicePaymentSucceeded(invoice: Stripe.Invoice): Promise<void> {
@@ -220,6 +250,10 @@ export class WebhooksService {
       if (error) {
         throw new Error(`Failed to recover past_due client ${clientUserId}: ${error.message}`);
       }
+      void this.notificationsService.createAndSendSubscriptionNotification(
+        clientUserId,
+        NotificationTypeDto.SUBSCRIPTION_REACTIVATED
+      );
     }
   }
 
@@ -229,12 +263,26 @@ export class WebhooksService {
     const clientUserId = await this.lookupClientByCustomerId(customerId);
     if (!clientUserId) return;
 
+    const { data: prior } = await this.db
+      .from('clients')
+      .select('subscription_status')
+      .eq('user_id', clientUserId)
+      .maybeSingle();
+    const wasPastDue = prior?.subscription_status === 'past_due';
+
     const { error } = await this.db
       .from('clients')
       .update({ subscription_status: 'past_due' })
       .eq('user_id', clientUserId);
     if (error) {
       throw new Error(`Failed to mark past_due for ${clientUserId}: ${error.message}`);
+    }
+
+    if (!wasPastDue) {
+      void this.notificationsService.createAndSendSubscriptionNotification(
+        clientUserId,
+        NotificationTypeDto.SUBSCRIPTION_PAST_DUE
+      );
     }
   }
 

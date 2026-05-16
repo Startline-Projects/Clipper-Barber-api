@@ -60,12 +60,14 @@ export interface NotificationFormatSeed {
   timezone: string;
 }
 
+// Types whose recipient is always a barber. RECURRING_PAUSED/RECURRING_RESUMED
+// are intentionally absent — they fire to the party that did NOT initiate the
+// action, so the recipient can be either a client or a barber.
 const BARBER_TYPES: ReadonlySet<NotificationTypeDto> = new Set([
   NotificationTypeDto.NEW_BOOKING,
   NotificationTypeDto.CANCELLED_BOOKING,
   NotificationTypeDto.NEW_RECURRING_REQUEST,
   NotificationTypeDto.RECURRING_CANCELLED,
-  NotificationTypeDto.RECURRING_PAUSED,
   NotificationTypeDto.RECURRING_ARRANGEMENT_ACCEPTED,
   NotificationTypeDto.RECURRING_ARRANGEMENT_REJECTED,
 ]);
@@ -74,6 +76,7 @@ const RECURRING_CATEGORY_TYPES: ReadonlySet<NotificationTypeDto> = new Set([
   NotificationTypeDto.NEW_RECURRING_REQUEST,
   NotificationTypeDto.RECURRING_CANCELLED,
   NotificationTypeDto.RECURRING_PAUSED,
+  NotificationTypeDto.RECURRING_RESUMED,
   NotificationTypeDto.RECURRING_ARRANGEMENT_OFFERED,
   NotificationTypeDto.RECURRING_ARRANGEMENT_ACCEPTED,
   NotificationTypeDto.RECURRING_ARRANGEMENT_REJECTED,
@@ -85,6 +88,7 @@ const TITLE_BY_TYPE: Record<NotificationTypeDto, string> = {
   [NotificationTypeDto.NEW_RECURRING_REQUEST]: 'New Recurring Request',
   [NotificationTypeDto.RECURRING_CANCELLED]: 'Recurring Cancelled',
   [NotificationTypeDto.RECURRING_PAUSED]: 'Recurring Paused',
+  [NotificationTypeDto.RECURRING_RESUMED]: 'Recurring Resumed',
   [NotificationTypeDto.BOOKING_CONFIRMED]: 'Booking Confirmed',
   [NotificationTypeDto.BOOKING_CANCELLED]: 'Booking Cancelled',
   [NotificationTypeDto.RECURRING_ACCEPTED]: 'Recurring Accepted',
@@ -95,6 +99,24 @@ const TITLE_BY_TYPE: Record<NotificationTypeDto, string> = {
   [NotificationTypeDto.RECURRING_ARRANGEMENT_OFFERED]: 'Recurring Arrangement Offer',
   [NotificationTypeDto.RECURRING_ARRANGEMENT_ACCEPTED]: 'Recurring Arrangement Accepted',
   [NotificationTypeDto.RECURRING_ARRANGEMENT_REJECTED]: 'Recurring Arrangement Declined',
+  [NotificationTypeDto.SUBSCRIPTION_ACTIVATED]: 'Subscription Active',
+  [NotificationTypeDto.SUBSCRIPTION_REACTIVATED]: 'Subscription Reactivated',
+  [NotificationTypeDto.SUBSCRIPTION_CANCEL_SCHEDULED]: 'Cancellation Scheduled',
+  [NotificationTypeDto.SUBSCRIPTION_CANCELLED]: 'Subscription Ended',
+  [NotificationTypeDto.SUBSCRIPTION_PAST_DUE]: 'Payment Failed',
+};
+
+const SUBSCRIPTION_BODY_BY_TYPE: Partial<Record<NotificationTypeDto, string>> = {
+  [NotificationTypeDto.SUBSCRIPTION_ACTIVATED]:
+    'Your subscription is now active. Enjoy full access.',
+  [NotificationTypeDto.SUBSCRIPTION_REACTIVATED]:
+    'Your payment went through. Your subscription is active again.',
+  [NotificationTypeDto.SUBSCRIPTION_CANCEL_SCHEDULED]:
+    'Your subscription will end at the close of the current billing period. You can reactivate any time before then.',
+  [NotificationTypeDto.SUBSCRIPTION_CANCELLED]:
+    'Your subscription has ended. Re-subscribe any time to restore access.',
+  [NotificationTypeDto.SUBSCRIPTION_PAST_DUE]:
+    'We were unable to charge your card. Please update your payment method to keep your subscription active.',
 };
 
 interface NotificationRow {
@@ -425,6 +447,53 @@ export class NotificationsService {
     }
   }
 
+  // Subscription lifecycle pushes — bypass the booking-centric formatter
+  // and the barber category toggles (recipient is always a client).
+  public async createAndSendSubscriptionNotification(
+    clientUserId: string,
+    type: NotificationTypeDto,
+  ): Promise<void> {
+    try {
+      const body = SUBSCRIPTION_BODY_BY_TYPE[type];
+      if (!body) {
+        this.logger.warn(`No subscription body template for ${type}`);
+        return;
+      }
+      const title = TITLE_BY_TYPE[type];
+
+      const { data, error } = await this.db
+        .from('notifications')
+        .insert({
+          recipient_id: clientUserId,
+          recipient_type: 'client',
+          sender_id: clientUserId,
+          type,
+          title,
+          body,
+          data: {},
+        })
+        .select('id')
+        .single();
+
+      if (error || !data) {
+        this.logger.error(
+          `Failed to persist subscription notification: ${error?.message ?? 'unknown'}`,
+        );
+        return;
+      }
+
+      await this.dispatchPush(clientUserId, title, body, {
+        notificationId: data.id as string,
+        type,
+      });
+    } catch (err) {
+      this.logger.error(
+        `createAndSendSubscriptionNotification failed for type=${type} recipient=${clientUserId}`,
+        err as Error,
+      );
+    }
+  }
+
   private async createAndSendChatNotification(
     input: CreateNotificationInput,
   ): Promise<void> {
@@ -481,6 +550,13 @@ export class NotificationsService {
     type: NotificationTypeDto,
     recipientType: RecipientType,
   ): boolean {
+    // Pause/Resume can target either party (the one who didn't initiate).
+    if (
+      type === NotificationTypeDto.RECURRING_PAUSED ||
+      type === NotificationTypeDto.RECURRING_RESUMED
+    ) {
+      return true;
+    }
     const isBarberType = BARBER_TYPES.has(type);
     if (isBarberType && recipientType !== 'barber') return false;
     if (!isBarberType && recipientType !== 'client') return false;

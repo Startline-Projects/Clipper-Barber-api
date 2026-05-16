@@ -67,8 +67,14 @@ export class RecurringBookingDto {
   @ApiProperty({ type: RecurringBookingPartyDto })
   barber: RecurringBookingPartyDto;
 
+  @ApiPropertyOptional({ nullable: true, description: "Barber's profile photo URL (raw public URL from barbers.profile_photo_url)." })
+  barberProfilePhotoUrl: string | null;
+
   @ApiProperty({ type: RecurringBookingPartyDto })
   client: RecurringBookingPartyDto;
+
+  @ApiPropertyOptional({ nullable: true, description: "Client's profile photo URL (raw public URL from clients.profile_photo_url)." })
+  clientProfilePhotoUrl: string | null;
 
   @ApiProperty() createdAt: string;
 

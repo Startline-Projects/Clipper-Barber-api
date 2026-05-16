@@ -7,6 +7,7 @@ import {
   ActivePlanResponseDto,
   CancelSubscriptionResponseDto,
   CreateSubscriptionResponseDto,
+  ReactivateSubscriptionResponseDto,
   SubscriptionStateResponseDto,
 } from './dto/subscription-response.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -63,7 +64,7 @@ export class SubscriptionsController {
 
   @Patch('me/plan')
   @HttpCode(200)
-  @ApiOperation({ summary: 'Switch plan (monthly → yearly only). Returns 409 for downgrades.' })
+  @ApiOperation({ summary: 'Switch plan (monthly → yearly only). Returns 400 for downgrades.' })
   @ApiBody({ type: SwitchPlanDto })
   @ApiResponse({ status: 200, type: SubscriptionStateResponseDto })
   public async switchPlan(
@@ -71,6 +72,19 @@ export class SubscriptionsController {
     @Body() dto: SwitchPlanDto
   ): Promise<SubscriptionStateResponseDto> {
     return this.subscriptionsService.switchPlan(user.sub, dto);
+  }
+
+  @Post('me/reactivate')
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      'Clear a pending cancellation. Re-enables the existing Stripe subscription before period end — no new subscription, no proration.',
+  })
+  @ApiResponse({ status: 200, type: ReactivateSubscriptionResponseDto })
+  public async reactivateSubscription(
+    @CurrentUser() user: SupabaseUserPayload
+  ): Promise<ReactivateSubscriptionResponseDto> {
+    return this.subscriptionsService.reactivateSubscription(user.sub);
   }
 
   @Delete('me')

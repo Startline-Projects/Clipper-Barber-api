@@ -1,4 +1,4 @@
-import { ConflictException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 
 // Class names are intentionally PascalCase so the global HttpExceptionFilter's
 // toSnakeCase(exception.name) produces the exact error codes required by the
@@ -10,8 +10,10 @@ export class SubscriptionRequired extends ForbiddenException {
   }
 }
 
-export class PlanDowngradeNotAllowed extends ConflictException {
-  constructor(message = 'Plan downgrades are not allowed. Yearly cannot revert to monthly.') {
+export class PlanDowngradeNotAllowed extends BadRequestException {
+  constructor(
+    message = 'Downgrading from yearly to monthly is not supported. Please cancel and re-subscribe.'
+  ) {
     super(message);
   }
 }

@@ -891,6 +891,18 @@ export class BookingsService {
       bookingId: row.id,
     });
 
+    // Auto-confirmation is a first-class confirmation event: mirror the
+    // BOOKING_CONFIRMED notification the client would receive on manual confirm.
+    if (row.status === 'confirmed') {
+      void this.notificationsService.createAndSendNotification({
+        recipientId: ctx.clientAuthId,
+        recipientType: 'client',
+        senderId: ctx.barberProfile.user_id,
+        type: NotificationTypeDto.BOOKING_CONFIRMED,
+        bookingId: row.id,
+      });
+    }
+
     void this.conversationsService.markHasBookingIfConversationExists(
       ctx.barberProfile.user_id,
       ctx.clientAuthId

@@ -6,6 +6,7 @@ export enum NotificationTypeDto {
   NEW_RECURRING_REQUEST = 'new_recurring_request',
   RECURRING_CANCELLED = 'recurring_cancelled',
   RECURRING_PAUSED = 'recurring_paused',
+  RECURRING_RESUMED = 'recurring_resumed',
   BOOKING_CONFIRMED = 'booking_confirmed',
   BOOKING_CANCELLED = 'booking_cancelled',
   RECURRING_ACCEPTED = 'recurring_accepted',
@@ -15,6 +16,11 @@ export enum NotificationTypeDto {
   RECURRING_ARRANGEMENT_OFFERED = 'recurring_arrangement_offered',
   RECURRING_ARRANGEMENT_ACCEPTED = 'recurring_arrangement_accepted',
   RECURRING_ARRANGEMENT_REJECTED = 'recurring_arrangement_rejected',
+  SUBSCRIPTION_ACTIVATED = 'subscription_activated',
+  SUBSCRIPTION_REACTIVATED = 'subscription_reactivated',
+  SUBSCRIPTION_CANCEL_SCHEDULED = 'subscription_cancel_scheduled',
+  SUBSCRIPTION_CANCELLED = 'subscription_cancelled',
+  SUBSCRIPTION_PAST_DUE = 'subscription_past_due',
 }
 
 export class NotificationDto {
