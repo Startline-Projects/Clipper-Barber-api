@@ -166,13 +166,14 @@ export class AuthService {
       throw new ConflictException(messages.client.USERNAME_TAKEN);
     }
 
-    // email_confirm: true so signInWithPassword succeeds immediately —
-    // signup must not be blocked on email transport. A best-effort
-    // confirmation email is still sent below for users who want to verify.
+    // email_confirm: false so Supabase will accept a follow-up signup
+    // confirmation email via auth.resend. Sign-in on unconfirmed users is
+    // permitted because the Supabase project has "Confirm email" disabled
+    // for sign-in — verification is a proof-of-ownership UX step, not a gate.
     const { data: userData, error: createError } = await this.client.auth.admin.createUser({
       email: dto.email,
       password: dto.password,
-      email_confirm: true,
+      email_confirm: false,
       user_metadata: { role: 'client', username: dto.username },
     });
 
@@ -191,9 +192,8 @@ export class AuthService {
       throw new BadRequestException(insertError.message);
     }
 
-    const tokens = await this.signInAndReturnTokens(dto.email, dto.password);
     await this.sendSignupConfirmation(dto.email);
-    return tokens;
+    return this.signInAndReturnTokens(dto.email, dto.password);
   }
 
   /**
