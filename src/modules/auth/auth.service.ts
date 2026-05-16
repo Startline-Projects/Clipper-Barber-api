@@ -36,7 +36,7 @@ export class AuthService {
     const { data: userData, error: createError } = await this.client.auth.admin.createUser({
       email: dto.email,
       password: dto.password,
-      email_confirm: false,
+      email_confirm: true,
       user_metadata: {
         role: 'barber',
         full_name: dto.fullName,
@@ -61,7 +61,6 @@ export class AuthService {
       throw new BadRequestException(insertError.message);
     }
 
-    await this.sendSignupConfirmation(dto.email);
     return this.signInAndReturnTokens(dto.email, dto.password);
   }
 
@@ -166,14 +165,13 @@ export class AuthService {
       throw new ConflictException(messages.client.USERNAME_TAKEN);
     }
 
-    // email_confirm: false so Supabase will accept a follow-up signup
-    // confirmation email via auth.resend. Sign-in on unconfirmed users is
-    // permitted because the Supabase project has "Confirm email" disabled
-    // for sign-in — verification is a proof-of-ownership UX step, not a gate.
+    // Auto-confirm so signup → immediate sign-in works regardless of the
+    // project's "Confirm email" setting. Email verification is a separate,
+    // optional in-app step via /auth/resend-verification + /auth/verify-email.
     const { data: userData, error: createError } = await this.client.auth.admin.createUser({
       email: dto.email,
       password: dto.password,
-      email_confirm: false,
+      email_confirm: true,
       user_metadata: { role: 'client', username: dto.username },
     });
 
@@ -192,7 +190,6 @@ export class AuthService {
       throw new BadRequestException(insertError.message);
     }
 
-    await this.sendSignupConfirmation(dto.email);
     return this.signInAndReturnTokens(dto.email, dto.password);
   }
 
@@ -275,12 +272,6 @@ export class AuthService {
     const anonClient = this.supabaseService.getAuthClient();
     await anonClient.auth.resend({ type: 'signup', email: dto.email });
     return { success: true };
-  }
-
-  private async sendSignupConfirmation(email: string): Promise<void> {
-    const anonClient = this.supabaseService.getAuthClient();
-    // Best-effort — never block account creation on email transport.
-    await anonClient.auth.resend({ type: 'signup', email }).catch(() => undefined);
   }
 
   private async deriveUniqueUsername(preferred: string | undefined, email: string): Promise<string> {
