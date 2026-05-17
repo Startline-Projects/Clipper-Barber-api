@@ -16,6 +16,12 @@ export class LoginResponseDto {
   @ApiProperty({ description: 'Display name — full name for barbers, username for clients' })
   username: string;
 
+  @ApiProperty({
+    description: 'True when the user has verified their email via the OTP flow.',
+    example: false,
+  })
+  emailVerified: boolean;
+
   @ApiPropertyOptional({
     description:
       'Only present when barber onboarding is incomplete. Navigate the app to this route.',

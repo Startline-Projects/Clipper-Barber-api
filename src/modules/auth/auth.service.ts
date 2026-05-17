@@ -4,6 +4,7 @@ import {
   ConflictException,
   Injectable,
   InternalServerErrorException,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -26,10 +27,26 @@ import messages from '../../common/messages.json';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(private readonly supabaseService: SupabaseService) {}
 
   private get client() {
     return this.supabaseService.getClient();
+  }
+
+  /**
+   * Fire-and-forget OTP delivery. Failures (rate limits, SMTP outages,
+   * template misconfig) are logged but never propagated — signup must not
+   * stall on a flaky mail provider. The user can always /auth/resend-verification.
+   */
+  private sendVerificationOtp(email: string): void {
+    void this.supabaseService
+      .getAuthClient()
+      .auth.signInWithOtp({ email, options: { shouldCreateUser: false } })
+      .then(({ error }) => {
+        if (error) this.logger.warn(`[verify-email send] ${email}: ${error.message}`);
+      });
   }
 
   public async registerBarberStep1(dto: BarberStep1Dto): Promise<TokensResponseDto> {
@@ -61,6 +78,7 @@ export class AuthService {
       throw new BadRequestException(insertError.message);
     }
 
+    this.sendVerificationOtp(dto.email);
     return this.signInAndReturnTokens(dto.email, dto.password);
   }
 
@@ -190,6 +208,7 @@ export class AuthService {
       throw new BadRequestException(insertError.message);
     }
 
+    this.sendVerificationOtp(dto.email);
     return this.signInAndReturnTokens(dto.email, dto.password);
   }
 
@@ -236,11 +255,20 @@ export class AuthService {
         user_id: user.id,
         username,
         name: (user.user_metadata?.full_name as string | undefined) ?? username,
+        email_verified_at: new Date().toISOString(),
       });
 
       if (insertError && insertError.code !== '23505') {
         throw new InternalServerErrorException(insertError.message);
       }
+    } else {
+      // Existing client — Google attests the email, so backfill the timestamp
+      // if it wasn't set previously (e.g. user signed up via password first).
+      await this.client
+        .from('clients')
+        .update({ email_verified_at: new Date().toISOString() })
+        .eq('user_id', user.id)
+        .is('email_verified_at', null);
     }
 
     const payload = await this.supabaseService.getUserFromToken(data.session.access_token);
@@ -251,26 +279,45 @@ export class AuthService {
     return this.buildClientLoginResponse(tokens, payload);
   }
 
+  /**
+   * Validates the 6-digit code emailed by sendVerificationOtp and stamps
+   * email_verified_at on the matching role row. We DO NOT use the returned
+   * supabase session — the app already has its own tokens from signup/login.
+   */
   public async verifyEmail(dto: VerifyEmailDto): Promise<SuccessResponseDto> {
-    const { error } = await this.client.auth.verifyOtp({
-      token_hash: dto.token,
-      type: dto.type ?? 'signup',
+    const anonClient = this.supabaseService.getAuthClient();
+    const { data, error } = await anonClient.auth.verifyOtp({
+      email: dto.email,
+      token: dto.code,
+      type: 'email',
     });
 
-    if (error) {
+    if (error || !data.user) {
       throw new UnauthorizedException(messages.auth.EMAIL_VERIFY_FAILED);
+    }
+
+    const role = (data.user.user_metadata?.role as string | undefined) ?? 'client';
+    const table = role === 'barber' ? 'barbers' : 'clients';
+
+    const { error: updateError } = await this.client
+      .from(table)
+      .update({ email_verified_at: new Date().toISOString() })
+      .eq('user_id', data.user.id);
+
+    if (updateError) {
+      throw new InternalServerErrorException(messages.auth.EMAIL_VERIFY_FAILED);
     }
 
     return { success: true };
   }
 
   /**
-   * Re-sends the signup confirmation email. Always returns success — we
-   * don't reveal whether the email exists, mirroring forgotPassword.
+   * Re-sends the verification OTP. Always returns success — we don't reveal
+   * whether the email exists, mirroring forgotPassword. Delivery failures
+   * are logged server-side.
    */
   public async resendVerification(dto: ResendVerificationDto): Promise<SuccessResponseDto> {
-    const anonClient = this.supabaseService.getAuthClient();
-    await anonClient.auth.resend({ type: 'signup', email: dto.email });
+    this.sendVerificationOtp(dto.email);
     return { success: true };
   }
 
@@ -318,6 +365,16 @@ export class AuthService {
     }
 
     return this.buildClientLoginResponse(tokens, payload);
+  }
+
+  private async isEmailVerified(userId: string, role: 'barber' | 'client'): Promise<boolean> {
+    const table = role === 'barber' ? 'barbers' : 'clients';
+    const { data } = await this.client
+      .from(table)
+      .select('email_verified_at')
+      .eq('user_id', userId)
+      .maybeSingle();
+    return !!data?.email_verified_at;
   }
 
   public async refresh(refreshToken: string): Promise<TokensResponseDto> {
@@ -376,7 +433,8 @@ export class AuthService {
       throw new NotFoundException('Client profile not found');
     }
 
-    return this.projectCanonicalId(data as Record<string, unknown>);
+    const projected = this.projectCanonicalId(data as Record<string, unknown>);
+    return { ...projected, emailVerified: !!(data as { email_verified_at?: string | null }).email_verified_at };
   }
 
   // Profile rows still carry both the internal `id` (barbers.id / clients.id)
@@ -399,6 +457,7 @@ export class AuthService {
       stripe_connect_account_id,
       latitude,
       longitude,
+      email_verified_at,
       ...rest
     } = row;
     return {
@@ -406,6 +465,7 @@ export class AuthService {
       id: user_id,
       latitude,
       longitude,
+      emailVerified: !!email_verified_at,
       allowAutoConfirm: !!allow_auto_confirm,
       autoConfirmToday: !!auto_confirm_today,
       recurringEnabled: !!recurring_enabled,
@@ -496,10 +556,10 @@ export class AuthService {
     };
   }
 
-  private buildBarberLoginResponse(
+  private async buildBarberLoginResponse(
     tokens: TokensResponseDto,
     payload: SupabaseUserPayload
-  ): LoginResponseDto {
+  ): Promise<LoginResponseDto> {
     const { full_name, onboarding_complete, onboarding_step } = payload.user_metadata;
 
     const response: LoginResponseDto = {
@@ -507,6 +567,7 @@ export class AuthService {
       id: payload.sub,
       email: payload.email,
       username: full_name ?? '',
+      emailVerified: await this.isEmailVerified(payload.sub, 'barber'),
     };
 
     if (!onboarding_complete) {
@@ -516,15 +577,16 @@ export class AuthService {
     return response;
   }
 
-  private buildClientLoginResponse(
+  private async buildClientLoginResponse(
     tokens: TokensResponseDto,
     payload: SupabaseUserPayload
-  ): LoginResponseDto {
+  ): Promise<LoginResponseDto> {
     return {
       ...tokens,
       id: payload.sub,
       email: payload.email,
       username: payload.user_metadata.username ?? '',
+      emailVerified: await this.isEmailVerified(payload.sub, 'client'),
     };
   }
 

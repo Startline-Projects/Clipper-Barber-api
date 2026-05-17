@@ -996,9 +996,9 @@ export class RecurringBookingsService {
 
     const items: RecurringBookingListItemDto[] = await Promise.all(
       pageRows.map(async (row) => {
-        const [barberName, clientName, serviceLite] = await Promise.all([
+        const [barberName, clientInfo, serviceLite] = await Promise.all([
           this.fetchBarberName(row.barber_id),
-          this.fetchClientName(row.client_id),
+          this.fetchClientNameAndPhoto(row.client_id),
           this.fetchServiceLite(row.barber_service_id),
         ]);
         return {
@@ -1011,7 +1011,8 @@ export class RecurringBookingsService {
           priceUsd: Number(row.price_usd),
           service: serviceLite,
           barber: { id: row.barber_id, name: barberName },
-          client: { id: row.client_id, name: clientName },
+          client: { id: row.client_id, name: clientInfo.name },
+          clientProfilePhotoUrl: clientInfo.profilePhotoUrl,
           nextOccurrenceAt: nextOccurrenceByRecurringId.get(row.id) ?? null,
           createdAt: new Date(row.created_at).toISOString(),
         };

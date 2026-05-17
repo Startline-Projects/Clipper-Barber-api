@@ -31,6 +31,7 @@ import { ClientRecurringBookingsListResponseDto } from './recurring/dto/client-r
 import { RecurringBookingsService } from './recurring/recurring.service';
 import { AnalyticsPeriodDto, AnalyticsQueryDto } from './dto/analytics-query.dto';
 import { AnalyticsResponseDto } from './dto/analytics-response.dto';
+import { EmailVerifiedGuard } from '../auth/guards/email-verified.guard';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -65,6 +66,7 @@ export class BookingsController {
 
   @Post('confirm')
   @Roles('client')
+  @UseGuards(EmailVerifiedGuard)
   // @UseGuards(SubscriptionRequiredGuard)
   @ApiOperation({ summary: 'Confirm a previewed booking — inserts a booking row' })
   @ApiBody({ type: PreviewBookingDto })

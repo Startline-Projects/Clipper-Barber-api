@@ -1,25 +1,18 @@
-import { IsEmail, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsEmail, IsString, Length } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class VerifyEmailDto {
-  @ApiProperty({
-    description:
-      'The `token_hash` query parameter from the Supabase confirmation email link (type=signup or type=email).',
-  })
-  @IsString()
-  @MinLength(10)
-  token!: string;
+  @ApiProperty({ example: 'user@example.com' })
+  @IsEmail()
+  email!: string;
 
   @ApiProperty({
-    required: false,
-    enum: ['signup', 'email'],
-    default: 'signup',
-    description:
-      'OTP type. Use `signup` for the initial confirmation email and `email` for email-change confirmations.',
+    example: '123456',
+    description: '6-digit code from the verification email.',
   })
-  @IsOptional()
   @IsString()
-  type?: 'signup' | 'email';
+  @Length(6, 6)
+  code!: string;
 }
 
 export class ResendVerificationDto {

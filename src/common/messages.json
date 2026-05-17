@@ -11,10 +11,11 @@
     "GOOGLE_SIGNIN_FAILED": "Google sign-in failed",
     "GOOGLE_INVALID_TOKEN": "Invalid Google id_token",
     "GOOGLE_ROLE_RESERVED": "This email is already registered as a barber and cannot sign in with Google as a client",
-    "EMAIL_VERIFY_FAILED": "Invalid or expired verification token",
+    "EMAIL_VERIFY_FAILED": "The code you entered is invalid or has expired. Request a new code and try again.",
     "EMAIL_ALREADY_VERIFIED": "Email is already verified",
     "EMAIL_RESEND_FAILED": "Could not resend verification email",
-    "EMAIL_NOT_FOUND": "No account found for this email"
+    "EMAIL_NOT_FOUND": "No account found for this email",
+    "EMAIL_NOT_VERIFIED": "Please verify your email address to continue. Check your inbox for the 6-digit code or tap Resend code."
   },
   "barber": {
     "PROFILE_UPDATE_FAILED": "Failed to update barber profile — profile row may not exist yet",

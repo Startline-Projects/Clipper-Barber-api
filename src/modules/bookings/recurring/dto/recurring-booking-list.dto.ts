@@ -17,6 +17,8 @@ export class RecurringBookingListItemDto {
   service: RecurringBookingServiceLiteDto;
   @ApiProperty({ type: RecurringBookingPartyDto }) barber: RecurringBookingPartyDto;
   @ApiProperty({ type: RecurringBookingPartyDto }) client: RecurringBookingPartyDto;
+  @ApiPropertyOptional({ nullable: true, type: String, description: "Client's profile photo URL (raw public URL from clients.profile_photo_url)." })
+  clientProfilePhotoUrl: string | null;
   @ApiPropertyOptional({ nullable: true, type: String }) nextOccurrenceAt: string | null;
   @ApiProperty() createdAt: string;
 }
