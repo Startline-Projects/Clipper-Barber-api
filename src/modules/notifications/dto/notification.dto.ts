@@ -21,6 +21,8 @@ export enum NotificationTypeDto {
   SUBSCRIPTION_CANCEL_SCHEDULED = 'subscription_cancel_scheduled',
   SUBSCRIPTION_CANCELLED = 'subscription_cancelled',
   SUBSCRIPTION_PAST_DUE = 'subscription_past_due',
+  NO_SHOW_RECORDED = 'no_show_recorded',
+  NO_SHOW_RESOLVED = 'no_show_resolved',
 }
 
 export class NotificationDto {

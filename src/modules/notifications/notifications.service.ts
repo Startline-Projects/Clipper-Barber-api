@@ -70,6 +70,7 @@ const BARBER_TYPES: ReadonlySet<NotificationTypeDto> = new Set([
   NotificationTypeDto.RECURRING_CANCELLED,
   NotificationTypeDto.RECURRING_ARRANGEMENT_ACCEPTED,
   NotificationTypeDto.RECURRING_ARRANGEMENT_REJECTED,
+  NotificationTypeDto.NO_SHOW_RESOLVED,
 ]);
 
 const RECURRING_CATEGORY_TYPES: ReadonlySet<NotificationTypeDto> = new Set([
@@ -104,6 +105,8 @@ const TITLE_BY_TYPE: Record<NotificationTypeDto, string> = {
   [NotificationTypeDto.SUBSCRIPTION_CANCEL_SCHEDULED]: 'Cancellation Scheduled',
   [NotificationTypeDto.SUBSCRIPTION_CANCELLED]: 'Subscription Ended',
   [NotificationTypeDto.SUBSCRIPTION_PAST_DUE]: 'Payment Failed',
+  [NotificationTypeDto.NO_SHOW_RECORDED]: 'No-Show Fee',
+  [NotificationTypeDto.NO_SHOW_RESOLVED]: 'No-Show Fee Paid',
 };
 
 const SUBSCRIPTION_BODY_BY_TYPE: Partial<Record<NotificationTypeDto, string>> = {
@@ -489,6 +492,60 @@ export class NotificationsService {
     } catch (err) {
       this.logger.error(
         `createAndSendSubscriptionNotification failed for type=${type} recipient=${clientUserId}`,
+        err as Error,
+      );
+    }
+  }
+
+  // No-show fee pushes — bypass the booking-centric formatter so the body
+  // states the fee amount explicitly rather than a service price.
+  public async createAndSendNoShowNotification(input: {
+    type: NotificationTypeDto.NO_SHOW_RECORDED | NotificationTypeDto.NO_SHOW_RESOLVED;
+    recipientId: string;
+    recipientType: RecipientType;
+    senderId: string;
+    bookingId: string;
+    amountUsd: number;
+  }): Promise<void> {
+    try {
+      if (input.recipientType === 'barber') {
+        const allowed = await this.isBarberCategoryAllowed(input.recipientId, input.type);
+        if (!allowed) return;
+      }
+
+      const actorName =
+        input.recipientType === 'barber'
+          ? await this.fetchClientName(input.senderId)
+          : (await this.fetchBarberDisplay(input.senderId)).name;
+
+      const amount = `$${this.formatPrice(input.amountUsd)}`;
+      const title = TITLE_BY_TYPE[input.type];
+      const body =
+        input.type === NotificationTypeDto.NO_SHOW_RECORDED
+          ? `${actorName} marked you as a no-show. A ${amount} fee is owed.`
+          : `${actorName} paid the ${amount} no-show fee.`;
+
+      const inserted = await this.persistNotification(
+        {
+          recipientId: input.recipientId,
+          recipientType: input.recipientType,
+          senderId: input.senderId,
+          type: input.type,
+          bookingId: input.bookingId,
+        },
+        title,
+        body,
+      );
+      if (!inserted) return;
+
+      await this.dispatchPush(input.recipientId, title, body, {
+        notificationId: inserted.id,
+        type: input.type,
+        bookingId: input.bookingId,
+      });
+    } catch (err) {
+      this.logger.error(
+        `createAndSendNoShowNotification failed for type=${input.type} recipient=${input.recipientId}`,
         err as Error,
       );
     }

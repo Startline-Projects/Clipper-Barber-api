@@ -11,6 +11,8 @@ import type { Stripe } from 'stripe/cjs/stripe.core';
 import { SupabaseService } from '../supabase/supabase.service';
 import { StripeService } from '../payments/stripe.service';
 import { ConnectService } from '../payments/connect.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationTypeDto } from '../notifications/dto/notification.dto';
 import {
   BarberNoShowStatsDto,
   InitiateNoShowPaymentResponseDto,
@@ -95,7 +97,8 @@ export class NoShowsService {
   constructor(
     private readonly supabaseService: SupabaseService,
     private readonly stripeService: StripeService,
-    private readonly connectService: ConnectService
+    private readonly connectService: ConnectService,
+    private readonly notificationsService: NotificationsService
   ) {}
 
   private get db() {
@@ -181,6 +184,17 @@ export class NoShowsService {
       source: 'manual',
       fromStatus: null,
       toStatus: 'unresolved',
+      amountUsd: input.amountUsd,
+    });
+
+    // Notify the client that they've been marked a no-show and owe a fee.
+    // Best-effort: a push failure must not roll back the row.
+    void this.notificationsService.createAndSendNoShowNotification({
+      type: NotificationTypeDto.NO_SHOW_RECORDED,
+      recipientId: input.clientAuthId,
+      recipientType: 'client',
+      senderId: input.barberAuthId,
+      bookingId: input.bookingId,
       amountUsd: input.amountUsd,
     });
 
@@ -571,6 +585,18 @@ export class NoShowsService {
         amountUsd: (pi.amount_received ?? pi.amount) / 100,
         failureReason,
       });
+
+      // Notify the barber that the no-show fee has been paid.
+      if (update.status === 'paid') {
+        void this.notificationsService.createAndSendNoShowNotification({
+          type: NotificationTypeDto.NO_SHOW_RESOLVED,
+          recipientId: row.barber_id,
+          recipientType: 'barber',
+          senderId: row.client_id,
+          bookingId: row.booking_id,
+          amountUsd: (pi.amount_received ?? pi.amount) / 100,
+        });
+      }
 
       // Best-effort booking mirror for legacy consumers on success only.
       if (update.status === 'paid' && pi.metadata?.booking_id) {

@@ -6,6 +6,7 @@ describe('NoShowsService.sortByBucket', () => {
   const svc = new NoShowsService(
     {} as never,
     {} as never,
+    {} as never,
     {} as never
   );
 
