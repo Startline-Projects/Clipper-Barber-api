@@ -1,31 +1,17 @@
 -- ============================================================
--- No-show payment hardening
+-- Step 2 of no-show payment hardening: audit table, columns,
+-- finality trigger, helper update, realtime publication.
 --
--- 1. Extend no_show_status enum with explicit lifecycle states.
--- 2. Add audit/observability columns on no_shows.
--- 3. Create no_show_payment_events audit table.
--- 4. Add no_shows to supabase_realtime so client/barber apps can
---    subscribe to row updates over RLS-filtered channels.
--- 5. Tighten finality: a paid row cannot transition back via the
---    application layer (guarded by trigger; refund path is a future
---    explicit transition out of 'paid' to 'refunded').
--- ============================================================
-
--- ── 1. Extend the status enum ───────────────────────────────
--- Postgres requires ADD VALUE to be top-level (not in a DO block when
--- targeting transactional migrations). IF NOT EXISTS makes it idempotent.
-ALTER TYPE no_show_status ADD VALUE IF NOT EXISTS 'payment_intent_created';
-ALTER TYPE no_show_status ADD VALUE IF NOT EXISTS 'requires_action';
-ALTER TYPE no_show_status ADD VALUE IF NOT EXISTS 'processing';
-ALTER TYPE no_show_status ADD VALUE IF NOT EXISTS 'payment_failed';
-ALTER TYPE no_show_status ADD VALUE IF NOT EXISTS 'canceled';
-ALTER TYPE no_show_status ADD VALUE IF NOT EXISTS 'reconciliation_required';
-
+-- The enum-value additions live in 20260517000002_no_show_payment_enum.sql
+-- because Postgres forbids referencing a freshly-added enum value in
+-- the same transaction (SQLSTATE 55P04).
+--
 -- Legacy values kept for backwards-compat with existing rows:
 --   'unresolved'      → still the initial "owed" state
 --   'pending_payment' → treat as alias for 'processing' going forward;
 --                       no new writes use it. Mapped at the API layer.
 --   'failed'          → alias for 'payment_failed'; mapped at API layer.
+-- ============================================================
 
 -- ── 2. Audit / observability columns on no_shows ────────────
 ALTER TABLE no_shows
