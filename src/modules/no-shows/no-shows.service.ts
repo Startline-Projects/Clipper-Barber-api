@@ -18,16 +18,33 @@ import {
   ListNoShowsResponseDto,
   NoShowItemDto,
   NoShowStatusDto,
+  ReconcileNoShowResponseDto,
 } from './dto/no-show.dto';
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 
-// Statuses that count against the client (still owed). Refunded does NOT
-// count — it represents a settled, then-reversed charge.
-export const UNRESOLVED_STATUSES = ['unresolved', 'failed'] as const;
+// Statuses that count against the client (still owed). Refunded and paid
+// do NOT count. Includes the legacy 'failed' alias for old rows.
+export const UNRESOLVED_STATUSES = [
+  'unresolved',
+  'failed',
+  'payment_failed',
+  'reconciliation_required',
+] as const;
+
+// Statuses that represent in-flight settlement — UI should show "settling"
+// not "pay now" and not "owed".
+export const IN_FLIGHT_STATUSES = [
+  'payment_intent_created',
+  'requires_action',
+  'processing',
+  'pending_payment', // legacy
+] as const;
+
 const RESOLVED_STATUSES = ['paid'] as const;
+const TERMINAL_STATUSES = ['paid', 'refunded', 'canceled'] as const;
 
 interface NoShowRow {
   id: string;
@@ -41,6 +58,11 @@ interface NoShowRow {
   stripe_payment_intent_id: string | null;
   resolved_at: string | null;
   created_at: string;
+  idempotency_key: string | null;
+  payment_attempts: number;
+  last_known_pi_status: string | null;
+  last_reconciled_at: string | null;
+  last_failure_reason: string | null;
 }
 
 interface RecordUnresolvedInput {
@@ -49,6 +71,21 @@ interface RecordUnresolvedInput {
   barberAuthId: string;
   amountUsd: number;
   reason: string | null;
+}
+
+type AuditSource = 'webhook' | 'reconcile' | 'client_init' | 'manual';
+
+interface AuditWriteInput {
+  noShowId: string;
+  source: AuditSource;
+  fromStatus: NoShowStatusDto | string | null;
+  toStatus: NoShowStatusDto | string;
+  stripePiId?: string | null;
+  stripePiStatus?: string | null;
+  stripeEventId?: string | null;
+  amountUsd?: number | null;
+  failureReason?: string | null;
+  rawPayload?: Record<string, unknown> | null;
 }
 
 @Injectable()
@@ -66,10 +103,50 @@ export class NoShowsService {
   }
 
   // ────────────────────────────────────────────────────────────
+  // Stripe ↔ internal status mapping
+  // ────────────────────────────────────────────────────────────
+
+  // Single source of truth for translating a Stripe PaymentIntent.status
+  // into a canonical NoShowStatusDto. Never returns the legacy aliases.
+  public mapStripeStatus(stripeStatus: Stripe.PaymentIntent.Status): NoShowStatusDto {
+    switch (stripeStatus) {
+      case 'succeeded':
+        return NoShowStatusDto.PAID;
+      case 'processing':
+        return NoShowStatusDto.PROCESSING;
+      case 'requires_action':
+      case 'requires_confirmation':
+        return NoShowStatusDto.REQUIRES_ACTION;
+      case 'requires_capture':
+        // Manual-capture is unused in this flow, but defensively treat as
+        // processing — webhook will follow with succeeded/failed.
+        return NoShowStatusDto.PROCESSING;
+      case 'requires_payment_method':
+        // First-time creation lands here. The caller decides whether to
+        // surface as PAYMENT_INTENT_CREATED (fresh PI) vs PAYMENT_FAILED
+        // (Stripe re-flagged after a declined attempt). Default to failed
+        // for safety; callers override on first create.
+        return NoShowStatusDto.PAYMENT_FAILED;
+      case 'canceled':
+        return NoShowStatusDto.CANCELED;
+      default:
+        return NoShowStatusDto.RECONCILIATION_REQUIRED;
+    }
+  }
+
+  // Normalises legacy/alias statuses for any downstream UX. Persisted rows
+  // may still hold 'pending_payment' or 'failed' from before the migration;
+  // we surface them as the new canonical names to API consumers.
+  public normaliseStatus(status: NoShowStatusDto | string): NoShowStatusDto {
+    if (status === 'pending_payment') return NoShowStatusDto.PROCESSING;
+    if (status === 'failed') return NoShowStatusDto.PAYMENT_FAILED;
+    return status as NoShowStatusDto;
+  }
+
+  // ────────────────────────────────────────────────────────────
   // Write path — called by BarbersService.markNoShow
   // ────────────────────────────────────────────────────────────
 
-  // Idempotent: re-marking a booking returns the existing row.
   public async recordUnresolved(input: RecordUnresolvedInput): Promise<NoShowItemDto> {
     if (!(input.amountUsd >= 0)) {
       throw new BadRequestException('No-show amount must be non-negative.');
@@ -99,16 +176,21 @@ export class NoShowsService {
       throw new InternalServerErrorException('Failed to record no-show');
     }
 
+    await this.writeAudit({
+      noShowId: (data as NoShowRow).id,
+      source: 'manual',
+      fromStatus: null,
+      toStatus: 'unresolved',
+      amountUsd: input.amountUsd,
+    });
+
     return this.projectRow(data as NoShowRow);
   }
 
   // ────────────────────────────────────────────────────────────
-  // Read paths — list / counts / stats
+  // Read paths
   // ────────────────────────────────────────────────────────────
 
-  // Cheap, used to surface hasBlockedNoShows + unresolvedNoShowsCount on
-  // barber-detail / eligibility endpoints. Calls the SQL helper so the
-  // filter logic stays in one place.
   public async unresolvedCount(clientAuthId: string): Promise<number> {
     const { data, error } = await this.db.rpc('client_unresolved_no_show_count', {
       p_client_id: clientAuthId,
@@ -134,10 +216,6 @@ export class NoShowsService {
     return this.listFor('barber', barberAuthId, query);
   }
 
-  // Single implementation, parameterized by the side requesting the page.
-  // Ordering: unresolved/failed (oldest first within bucket), then paid /
-  // refunded (newest first). Implemented in JS rather than SQL so we don't
-  // need a CASE in the ORDER BY when fetching from Supabase.
   private async listFor(
     side: 'client' | 'barber',
     authId: string,
@@ -202,6 +280,8 @@ export class NoShowsService {
         resolvedCount += 1;
         resolvedAmount += amt;
       }
+      // In-flight rows (processing / requires_action / etc.) are counted in
+      // neither bucket — they are transient.
     }
 
     return {
@@ -217,12 +297,6 @@ export class NoShowsService {
   // Payment initiation (client-side)
   // ────────────────────────────────────────────────────────────
 
-  // Client pays a single no-show. Returns the PaymentIntent client_secret
-  // for the mobile/web SDK to confirm on-session. The webhook is the
-  // source of truth — this method only flips status to 'pending_payment'.
-  //
-  // Idempotent against retries: if a PI is already attached and still in
-  // an actionable state, the same client_secret is returned.
   public async initiatePayment(
     clientAuthId: string,
     noShowId: string
@@ -232,12 +306,10 @@ export class NoShowsService {
     if (row.client_id !== clientAuthId) {
       throw new ForbiddenException('You cannot pay this no-show.');
     }
-    if (row.status === 'paid' || row.status === 'refunded') {
+    if ((TERMINAL_STATUSES as readonly string[]).includes(row.status)) {
       throw new ConflictException('This no-show has already been resolved.');
     }
 
-    // Barber must have an active Connect account that can accept charges,
-    // otherwise transfer_data.destination will reject the PaymentIntent.
     const barber = await this.loadBarberForCharge(row.barber_id);
     if (!barber.stripe_connect_account_id) {
       throw new ConflictException('Barber is not set up to receive payments.');
@@ -255,13 +327,18 @@ export class NoShowsService {
       throw new BadRequestException('Invalid no-show amount.');
     }
 
-    // Reuse existing PI if one is already attached and recoverable.
+    // Reuse a recoverable PI if one exists. This is the frontend-double-tap
+    // safety net layered on top of Stripe's own idempotency key.
     if (row.stripe_payment_intent_id) {
       const existing = await this.retrieveRecoverableIntent(row.stripe_payment_intent_id);
       if (existing) {
-        return this.toInitiateResponse(row.id, existing, Number(row.amount_usd), row.currency);
+        return this.toInitiateResponse(row, existing);
       }
     }
+
+    // Stable, per-no-show idempotency key. Any retry within 24h returns the
+    // same PI rather than creating duplicates.
+    const idempotencyKey = `no_show_init_${row.id}`;
 
     let pi: Stripe.PaymentIntent;
     try {
@@ -280,82 +357,258 @@ export class NoShowsService {
             client_id: clientAuthId,
           },
         },
-        // Stripe-level idempotency: any retry from the client within 24h
-        // returns the same PaymentIntent rather than creating duplicates.
-        { idempotencyKey: `no_show_init_${row.id}` }
+        { idempotencyKey }
       );
     } catch (err) {
       this.logger.error(`Stripe create PI failed for no-show ${row.id}`, err as Error);
       throw new InternalServerErrorException('Failed to start payment');
     }
 
+    // Flip the row to payment_intent_created (or whatever the live PI status
+    // maps to). Increment payment_attempts so we can spot retry loops.
+    const initialStatus = this.mapStripeStatus(pi.status);
+    const persistedStatus: NoShowStatusDto =
+      pi.status === 'requires_payment_method'
+        ? NoShowStatusDto.PAYMENT_INTENT_CREATED
+        : initialStatus;
+
     const { error: upErr } = await this.db
       .from('no_shows')
       .update({
-        status: 'pending_payment',
+        status: persistedStatus,
         stripe_payment_intent_id: pi.id,
+        idempotency_key: idempotencyKey,
+        payment_attempts: row.payment_attempts + 1,
+        last_known_pi_status: pi.status,
       })
       .eq('id', row.id)
-      .in('status', ['unresolved', 'failed', 'pending_payment']);
+      .in('status', [
+        'unresolved',
+        'failed',
+        'payment_failed',
+        'pending_payment',
+        'payment_intent_created',
+        'requires_action',
+        'processing',
+        'reconciliation_required',
+      ]);
+
     if (upErr) {
-      this.logger.error(`Failed to flag pending_payment for ${row.id}`, upErr);
-      // Don't roll back the PI — the webhook can still settle it via the
-      // metadata.no_show_id linkage.
+      this.logger.error(`Failed to flag ${persistedStatus} for ${row.id}`, upErr);
+      // Don't roll back the PI — webhook + reconcile can still settle it.
+    } else {
+      await this.writeAudit({
+        noShowId: row.id,
+        source: 'client_init',
+        fromStatus: row.status,
+        toStatus: persistedStatus,
+        stripePiId: pi.id,
+        stripePiStatus: pi.status,
+        amountUsd: Number(row.amount_usd),
+      });
     }
 
-    return this.toInitiateResponse(row.id, pi, Number(row.amount_usd), row.currency);
+    return this.toInitiateResponse({ ...row, idempotency_key: idempotencyKey }, pi);
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Reconciliation — authoritative self-heal against Stripe
+  // ────────────────────────────────────────────────────────────
+
+  public async reconcile(
+    clientAuthId: string,
+    noShowId: string
+  ): Promise<ReconcileNoShowResponseDto> {
+    const row = await this.fetchById(noShowId);
+    if (row.client_id !== clientAuthId) {
+      throw new ForbiddenException('You cannot reconcile this no-show.');
+    }
+
+    const now = new Date().toISOString();
+
+    if (!row.stripe_payment_intent_id) {
+      await this.db
+        .from('no_shows')
+        .update({ last_reconciled_at: now })
+        .eq('id', row.id);
+      return {
+        noShowId: row.id,
+        status: this.normaliseStatus(row.status),
+        stripePaymentIntentStatus: null,
+        changed: false,
+        reconciledAt: now,
+      };
+    }
+
+    let pi: Stripe.PaymentIntent | null = null;
+    try {
+      pi = await this.stripeService.stripe.paymentIntents.retrieve(
+        row.stripe_payment_intent_id
+      );
+    } catch (err) {
+      this.logger.error(
+        `Reconcile: Stripe retrieve failed for PI ${row.stripe_payment_intent_id}`,
+        err as Error
+      );
+      // Mark for follow-up so an operator/cron can investigate.
+      await this.db
+        .from('no_shows')
+        .update({
+          status: 'reconciliation_required',
+          last_reconciled_at: now,
+          last_failure_reason: 'stripe_retrieve_failed',
+        })
+        .eq('id', row.id)
+        .not('status', 'in', `(${TERMINAL_STATUSES.map((s) => `"${s}"`).join(',')})`);
+      throw new InternalServerErrorException('Unable to verify payment with Stripe.');
+    }
+
+    const changed = await this.applyPiToRow(row, pi, 'reconcile');
+
+    const fresh = await this.fetchById(row.id);
+    return {
+      noShowId: fresh.id,
+      status: this.normaliseStatus(fresh.status),
+      stripePaymentIntentStatus: pi.status,
+      changed,
+      reconciledAt: now,
+    };
   }
 
   // ────────────────────────────────────────────────────────────
   // Webhook entry point — called by WebhooksService
   // ────────────────────────────────────────────────────────────
 
-  // Settles a no-show row from a payment_intent terminal event. Idempotent:
-  // a duplicate webhook against an already-paid row is a no-op.
+  // Idempotent: a duplicate webhook against a terminal row is a no-op.
   public async settleFromPaymentIntent(
     pi: Stripe.PaymentIntent,
-    outcome: 'succeeded' | 'failed'
+    _outcome: 'succeeded' | 'failed' | 'processing' | 'requires_action' | 'canceled',
+    eventId?: string
   ): Promise<void> {
     const noShowId = pi.metadata?.no_show_id;
     if (!noShowId) return;
 
-    if (outcome === 'succeeded') {
-      const charge = pi.latest_charge;
-      const transferId =
-        typeof charge === 'object' && charge !== null
-          ? (charge.transfer as string | null | undefined) ?? null
-          : null;
+    const row = await this.fetchById(noShowId).catch(() => null);
+    if (!row) return;
 
-      const { error } = await this.db
-        .from('no_shows')
-        .update({
-          status: 'paid',
-          resolved_at: new Date().toISOString(),
-          stripe_payment_intent_id: pi.id,
-          stripe_transfer_id: transferId,
-          payment_metadata: { amount_received: pi.amount_received ?? pi.amount },
-        })
-        .eq('id', noShowId)
-        .in('status', ['unresolved', 'pending_payment', 'failed']);
-      if (error) {
-        this.logger.error(`Failed to mark no-show ${noShowId} paid`, error);
-        throw error;
-      }
+    await this.applyPiToRow(row, pi, 'webhook', eventId);
+  }
+
+  // Core state-transition primitive. Used by both webhook + reconcile.
+  // Returns true if the DB row changed.
+  private async applyPiToRow(
+    row: NoShowRow,
+    pi: Stripe.PaymentIntent,
+    source: AuditSource,
+    eventId?: string
+  ): Promise<boolean> {
+    // Never reverse a terminal state. The DB trigger also enforces this;
+    // the early-return saves an audit row + a noisy 23514.
+    if ((TERMINAL_STATUSES as readonly string[]).includes(row.status)) {
+      return false;
+    }
+
+    const nextStatus = this.mapStripeStatus(pi.status);
+    const now = new Date().toISOString();
+    const failureReason = pi.last_payment_error?.message ?? null;
+
+    const update: Record<string, unknown> = {
+      stripe_payment_intent_id: pi.id,
+      last_known_pi_status: pi.status,
+      last_webhook_event_at: source === 'webhook' ? now : undefined,
+      last_reconciled_at: source === 'reconcile' ? now : undefined,
+      last_failure_reason: failureReason,
+    };
+
+    if (nextStatus === NoShowStatusDto.PAID) {
+      const latest = pi.latest_charge;
+      const transferId =
+        typeof latest === 'object' && latest !== null
+          ? ((latest as Stripe.Charge).transfer as string | null | undefined) ?? null
+          : null;
+      update.status = 'paid';
+      update.resolved_at = now;
+      update.stripe_transfer_id = transferId;
+      update.payment_metadata = {
+        amount_received: pi.amount_received ?? pi.amount,
+        reconciled_via: source,
+      };
     } else {
-      const failureReason = pi.last_payment_error?.message ?? null;
-      const { error } = await this.db
-        .from('no_shows')
-        .update({
-          status: 'failed',
-          stripe_payment_intent_id: pi.id,
-          payment_metadata: { last_failure: failureReason },
-        })
-        .eq('id', noShowId)
-        .in('status', ['pending_payment', 'unresolved']);
-      if (error) {
-        this.logger.error(`Failed to mark no-show ${noShowId} failed`, error);
-        throw error;
+      update.status = nextStatus;
+    }
+
+    // Strip undefined so Supabase doesn't try to set them to null.
+    for (const k of Object.keys(update)) {
+      if (update[k] === undefined) delete update[k];
+    }
+
+    const { error } = await this.db
+      .from('no_shows')
+      .update(update)
+      .eq('id', row.id)
+      // Guard against concurrent finalisers racing us.
+      .not('status', 'in', `(${TERMINAL_STATUSES.map((s) => `"${s}"`).join(',')})`);
+
+    if (error) {
+      this.logger.error(`applyPiToRow failed for ${row.id}`, error);
+      // Don't throw on webhook path — Stripe would retry forever. The
+      // reconcile path catches its own errors.
+      if (source === 'reconcile') {
+        throw new InternalServerErrorException('Failed to apply Stripe state.');
       }
+      return false;
+    }
+
+    if (row.status !== update.status) {
+      await this.writeAudit({
+        noShowId: row.id,
+        source,
+        fromStatus: row.status,
+        toStatus: update.status as string,
+        stripePiId: pi.id,
+        stripePiStatus: pi.status,
+        stripeEventId: eventId ?? null,
+        amountUsd: (pi.amount_received ?? pi.amount) / 100,
+        failureReason,
+      });
+
+      // Best-effort booking mirror for legacy consumers on success only.
+      if (update.status === 'paid' && pi.metadata?.booking_id) {
+        const amountUsd = (pi.amount_received ?? pi.amount) / 100;
+        const { error: bErr } = await this.db
+          .from('bookings')
+          .update({ no_show_charged: true, no_show_charge_amount_usd: amountUsd })
+          .eq('id', pi.metadata.booking_id);
+        if (bErr) {
+          this.logger.error(`Failed to mirror booking flag for ${pi.metadata.booking_id}`, bErr);
+        }
+      }
+    }
+
+    return row.status !== update.status;
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Audit
+  // ────────────────────────────────────────────────────────────
+
+  private async writeAudit(input: AuditWriteInput): Promise<void> {
+    const { error } = await this.db.from('no_show_payment_events').insert({
+      no_show_id: input.noShowId,
+      stripe_event_id: input.stripeEventId ?? null,
+      stripe_payment_intent_id: input.stripePiId ?? null,
+      source: input.source,
+      from_status: input.fromStatus ?? null,
+      to_status: input.toStatus,
+      stripe_pi_status: input.stripePiStatus ?? null,
+      amount_usd: input.amountUsd ?? null,
+      failure_reason: input.failureReason ?? null,
+      raw_payload: input.rawPayload ?? null,
+    });
+    if (error) {
+      // Duplicate event_id is fine (Stripe retry).
+      if (error.code === '23505') return;
+      this.logger.error('Failed to write no_show_payment_events row', error);
     }
   }
 
@@ -426,42 +679,47 @@ export class NoShowsService {
   }
 
   private toInitiateResponse(
-    noShowId: string,
-    pi: Stripe.PaymentIntent,
-    amountUsd: number,
-    currency: string
+    row: NoShowRow,
+    pi: Stripe.PaymentIntent
   ): InitiateNoShowPaymentResponseDto {
     if (!pi.client_secret) {
       throw new InternalServerErrorException('Stripe did not return a client_secret');
     }
+    const mapped =
+      pi.status === 'requires_payment_method'
+        ? NoShowStatusDto.PAYMENT_INTENT_CREATED
+        : this.mapStripeStatus(pi.status);
     return {
-      noShowId,
+      noShowId: row.id,
       paymentIntentId: pi.id,
       clientSecret: pi.client_secret,
-      status: pi.status === 'succeeded' ? NoShowStatusDto.PAID : NoShowStatusDto.PENDING_PAYMENT,
-      amountUsd,
-      currency,
+      status: mapped,
+      stripePaymentIntentStatus: pi.status,
+      idempotencyKey: row.idempotency_key ?? `no_show_init_${row.id}`,
+      amountUsd: Number(row.amount_usd),
+      currency: row.currency,
     };
   }
 
-  // Sort: unresolved/failed first (asc by created_at — oldest first so the
-  // most overdue is on top), then paid/refunded (desc by created_at).
   public sortByBucket(rows: NoShowRow[]): NoShowRow[] {
     const unresolved: NoShowRow[] = [];
+    const inFlight: NoShowRow[] = [];
     const resolved: NoShowRow[] = [];
     for (const r of rows) {
       if ((UNRESOLVED_STATUSES as readonly string[]).includes(r.status)) unresolved.push(r);
+      else if ((IN_FLIGHT_STATUSES as readonly string[]).includes(r.status)) inFlight.push(r);
       else resolved.push(r);
     }
     unresolved.sort((a, b) => a.created_at.localeCompare(b.created_at));
+    inFlight.sort((a, b) => b.created_at.localeCompare(a.created_at));
     resolved.sort((a, b) => b.created_at.localeCompare(a.created_at));
-    return [...unresolved, ...resolved];
+    return [...unresolved, ...inFlight, ...resolved];
   }
 
   private projectRow(row: NoShowRow): NoShowItemDto {
     return {
       id: row.id,
-      status: row.status,
+      status: this.normaliseStatus(row.status),
       amountUsd: Number(row.amount_usd),
       currency: row.currency,
       reason: row.reason,
@@ -472,10 +730,6 @@ export class NoShowsService {
     };
   }
 
-  // Joins-by-hand because Supabase joins return embedded objects that the
-  // Postgres role would need RLS for. Service role bypasses RLS, but we
-  // keep the join explicit so the shape is predictable and the query plan
-  // is straightforward.
   private async hydrateItems(
     side: 'client' | 'barber',
     rows: NoShowRow[]
@@ -500,7 +754,7 @@ export class NoShowsService {
       const cp = counterparties.get(counterpartyId);
       return {
         id: r.id,
-        status: r.status,
+        status: this.normaliseStatus(r.status),
         amountUsd: Number(r.amount_usd),
         currency: r.currency,
         reason: r.reason,

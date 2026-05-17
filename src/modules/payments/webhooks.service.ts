@@ -67,13 +67,36 @@ export class WebhooksService {
         case 'payment_intent.succeeded':
           await this.handlePaymentIntentTerminal(
             event.data.object as Stripe.PaymentIntent,
-            'succeeded'
+            'succeeded',
+            event.id
           );
           break;
         case 'payment_intent.payment_failed':
           await this.handlePaymentIntentTerminal(
             event.data.object as Stripe.PaymentIntent,
-            'failed'
+            'failed',
+            event.id
+          );
+          break;
+        case 'payment_intent.processing':
+          await this.handlePaymentIntentTerminal(
+            event.data.object as Stripe.PaymentIntent,
+            'processing',
+            event.id
+          );
+          break;
+        case 'payment_intent.requires_action':
+          await this.handlePaymentIntentTerminal(
+            event.data.object as Stripe.PaymentIntent,
+            'requires_action',
+            event.id
+          );
+          break;
+        case 'payment_intent.canceled':
+          await this.handlePaymentIntentTerminal(
+            event.data.object as Stripe.PaymentIntent,
+            'canceled',
+            event.id
           );
           break;
         case 'account.updated':
@@ -288,15 +311,18 @@ export class WebhooksService {
 
   private async handlePaymentIntentTerminal(
     pi: Stripe.PaymentIntent,
-    outcome: 'succeeded' | 'failed'
+    outcome: 'succeeded' | 'failed' | 'processing' | 'requires_action' | 'canceled',
+    eventId?: string
   ): Promise<void> {
     // New client-initiated no-show resolution flow. Settles the no_shows
     // row keyed by metadata.no_show_id. The row is the source of truth;
     // bookings.no_show_charged is mirrored below for backwards compat.
     if (pi.metadata?.kind === 'no_show_resolution') {
-      await this.settleNoShowResolution(pi, outcome);
+      await this.settleNoShowResolution(pi, outcome, eventId);
       return;
     }
+    // Non-no-show PIs only have terminal-state side effects today.
+    if (outcome !== 'succeeded' && outcome !== 'failed') return;
 
     // Legacy auto-charge audit table — left in place so previously-fired
     // webhooks still update their original audit row. New no-shows do not
@@ -329,62 +355,132 @@ export class WebhooksService {
     }
   }
 
+  // Settles a no_shows row from any PaymentIntent lifecycle event.
+  //
+  // The DB row is the source of truth. Stripe is reconciled into our
+  // internal lifecycle states via mapStripeStatusToNoShow(). Terminal
+  // states (paid/refunded/canceled) are immutable here — the DB trigger
+  // also enforces this; the early-return saves an audit row + a noisy
+  // 23514 error.
+  //
+  // Out-of-order delivery safe: a 'processing' arriving after 'succeeded'
+  // is ignored because the row is already paid.
   private async settleNoShowResolution(
     pi: Stripe.PaymentIntent,
-    outcome: 'succeeded' | 'failed'
+    _outcome: 'succeeded' | 'failed' | 'processing' | 'requires_action' | 'canceled',
+    eventId?: string
   ): Promise<void> {
     const noShowId = pi.metadata?.no_show_id;
     if (!noShowId) return;
 
-    if (outcome === 'succeeded') {
+    const terminal = new Set(['paid', 'refunded', 'canceled']);
+
+    const { data: current, error: readErr } = await this.db
+      .from('no_shows')
+      .select('id, status, booking_id')
+      .eq('id', noShowId)
+      .maybeSingle();
+    if (readErr || !current) {
+      this.logger.warn(`settleNoShowResolution: no_shows row ${noShowId} not found`);
+      return;
+    }
+    if (terminal.has(current.status as string)) {
+      this.logger.log(
+        `settleNoShowResolution: ignoring ${pi.status} for ${noShowId} (already ${current.status})`
+      );
+      return;
+    }
+
+    const nextStatus = this.mapStripePiStatusToNoShow(pi.status);
+    const failureReason = pi.last_payment_error?.message ?? null;
+    const now = new Date().toISOString();
+
+    const update: Record<string, unknown> = {
+      stripe_payment_intent_id: pi.id,
+      last_known_pi_status: pi.status,
+      last_webhook_event_at: now,
+      last_failure_reason: failureReason,
+      status: nextStatus,
+    };
+
+    if (nextStatus === 'paid') {
       const latest = pi.latest_charge;
       const transferId =
         typeof latest === 'object' && latest !== null
-          ? ((latest.transfer as string | null | undefined) ?? null)
+          ? ((latest as Stripe.Charge).transfer as string | null | undefined) ?? null
           : null;
+      update.resolved_at = now;
+      update.stripe_transfer_id = transferId;
+      update.payment_metadata = {
+        amount_received: pi.amount_received ?? pi.amount,
+        reconciled_via: 'webhook',
+      };
+    }
 
-      const { error } = await this.db
-        .from('no_shows')
-        .update({
-          status: 'paid',
-          resolved_at: new Date().toISOString(),
-          stripe_payment_intent_id: pi.id,
-          stripe_transfer_id: transferId,
-          payment_metadata: { amount_received: pi.amount_received ?? pi.amount },
-        })
-        .eq('id', noShowId)
-        .in('status', ['unresolved', 'pending_payment', 'failed']);
-      if (error) {
-        throw new Error(`Failed to mark no-show ${noShowId} paid: ${error.message}`);
-      }
+    const { error } = await this.db
+      .from('no_shows')
+      .update(update)
+      .eq('id', noShowId)
+      .not(
+        'status',
+        'in',
+        '("paid","refunded","canceled")'
+      );
+    if (error) {
+      throw new Error(`Failed to settle no-show ${noShowId}: ${error.message}`);
+    }
 
-      // Mirror booking flag for legacy consumers. Best-effort: a failure
-      // here doesn't unwind the no_shows row.
-      const bookingId = pi.metadata?.booking_id;
-      if (bookingId) {
-        const amountUsd = (pi.amount_received ?? pi.amount) / 100;
-        const { error: bErr } = await this.db
-          .from('bookings')
-          .update({ no_show_charged: true, no_show_charge_amount_usd: amountUsd })
-          .eq('id', bookingId);
-        if (bErr) {
-          this.logger.error(`Failed to mirror booking flag for ${bookingId}`, bErr);
-        }
+    // Audit row (idempotent against Stripe retries via stripe_event_id unique).
+    if (current.status !== nextStatus) {
+      const { error: auditErr } = await this.db.from('no_show_payment_events').insert({
+        no_show_id: noShowId,
+        stripe_event_id: eventId ?? null,
+        stripe_payment_intent_id: pi.id,
+        source: 'webhook',
+        from_status: current.status,
+        to_status: nextStatus,
+        stripe_pi_status: pi.status,
+        amount_usd: (pi.amount_received ?? pi.amount) / 100,
+        failure_reason: failureReason,
+      });
+      if (auditErr && auditErr.code !== '23505') {
+        this.logger.error(`Audit insert failed for no-show ${noShowId}`, auditErr);
       }
-    } else {
-      const failureReason = pi.last_payment_error?.message ?? null;
-      const { error } = await this.db
-        .from('no_shows')
-        .update({
-          status: 'failed',
-          stripe_payment_intent_id: pi.id,
-          payment_metadata: { last_failure: failureReason },
-        })
-        .eq('id', noShowId)
-        .in('status', ['pending_payment', 'unresolved']);
-      if (error) {
-        throw new Error(`Failed to mark no-show ${noShowId} failed: ${error.message}`);
+    }
+
+    if (nextStatus === 'paid' && current.booking_id) {
+      const amountUsd = (pi.amount_received ?? pi.amount) / 100;
+      const { error: bErr } = await this.db
+        .from('bookings')
+        .update({ no_show_charged: true, no_show_charge_amount_usd: amountUsd })
+        .eq('id', current.booking_id);
+      if (bErr) {
+        this.logger.error(`Failed to mirror booking flag for ${current.booking_id}`, bErr);
       }
+    }
+  }
+
+  // Stripe → internal status. Mirrors NoShowsService.mapStripeStatus —
+  // duplicated here to avoid a circular module dependency between
+  // PaymentsModule (exports WebhooksService) and NoShowsModule (imports
+  // PaymentsModule). If the mapping ever diverges, treat it as a bug.
+  private mapStripePiStatusToNoShow(stripeStatus: Stripe.PaymentIntent.Status): string {
+    switch (stripeStatus) {
+      case 'succeeded':
+        return 'paid';
+      case 'processing':
+        return 'processing';
+      case 'requires_action':
+      case 'requires_confirmation':
+        return 'requires_action';
+      case 'requires_capture':
+        return 'processing';
+      case 'requires_payment_method':
+        return 'payment_failed';
+      case 'canceled':
+        return 'canceled';
+      default:
+        return 'reconciliation_required';
     }
   }
 

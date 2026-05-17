@@ -2,12 +2,25 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsEnum, IsInt, IsOptional, Min, Max } from 'class-validator';
 import { Type } from 'class-transformer';
 
+// Canonical lifecycle states. UNRESOLVED is the initial "owed" state.
+// PENDING_PAYMENT and FAILED are legacy aliases kept for rows written
+// before the hardening migration; new writes use the explicit lifecycle
+// states (PAYMENT_INTENT_CREATED, REQUIRES_ACTION, PROCESSING,
+// PAYMENT_FAILED, CANCELED, RECONCILIATION_REQUIRED).
 export enum NoShowStatusDto {
   UNRESOLVED = 'unresolved',
-  PENDING_PAYMENT = 'pending_payment',
+  PAYMENT_INTENT_CREATED = 'payment_intent_created',
+  REQUIRES_ACTION = 'requires_action',
+  PROCESSING = 'processing',
   PAID = 'paid',
-  FAILED = 'failed',
+  PAYMENT_FAILED = 'payment_failed',
+  CANCELED = 'canceled',
   REFUNDED = 'refunded',
+  RECONCILIATION_REQUIRED = 'reconciliation_required',
+  // Legacy — aliased to PROCESSING / PAYMENT_FAILED in API responses but
+  // still surfaced for any rows that haven't been touched since migration.
+  PENDING_PAYMENT = 'pending_payment',
+  FAILED = 'failed',
 }
 
 export class NoShowBookingSummaryDto {
@@ -99,8 +112,34 @@ export class InitiateNoShowPaymentResponseDto {
   @ApiProperty({ description: 'Stripe PaymentIntent id.' }) paymentIntentId: string;
   @ApiProperty({ description: 'Use with stripe-js confirmCardPayment / Payment Sheet.' })
   clientSecret: string;
-  @ApiProperty({ enum: NoShowStatusDto, example: NoShowStatusDto.PENDING_PAYMENT })
+  @ApiProperty({ enum: NoShowStatusDto, example: NoShowStatusDto.PROCESSING })
   status: NoShowStatusDto;
   @ApiProperty({ example: 25 }) amountUsd: number;
   @ApiProperty({ example: 'usd' }) currency: string;
+  @ApiProperty({
+    description:
+      'Stripe PaymentIntent.status at the moment of response, for client-side UX hints (e.g. "requires_action" triggers a 3DS prompt). Not the source of truth for settlement — the no_shows row is.',
+    example: 'requires_action',
+  })
+  stripePaymentIntentStatus: string;
+  @ApiProperty({
+    description: 'Echoed back so the client can correlate logs with backend traces.',
+    example: 'no_show_init_<uuid>',
+  })
+  idempotencyKey: string;
+}
+
+export class ReconcileNoShowResponseDto {
+  @ApiProperty() noShowId: string;
+  @ApiProperty({ enum: NoShowStatusDto }) status: NoShowStatusDto;
+  @ApiProperty({
+    description:
+      'Stripe PaymentIntent.status used to derive the row state. Null if no PaymentIntent has been created yet (row was reconciled while still "unresolved").',
+    nullable: true,
+    type: String,
+  })
+  stripePaymentIntentStatus: string | null;
+  @ApiProperty({ description: 'True if the call mutated the row.', example: true })
+  changed: boolean;
+  @ApiProperty() reconciledAt: string;
 }

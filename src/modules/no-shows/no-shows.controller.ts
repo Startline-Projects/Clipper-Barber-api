@@ -11,6 +11,7 @@ import {
   InitiateNoShowPaymentResponseDto,
   ListNoShowsQueryDto,
   ListNoShowsResponseDto,
+  ReconcileNoShowResponseDto,
 } from './dto/no-show.dto';
 
 // ────────────────────────────────────────────────────────────
@@ -48,6 +49,19 @@ export class ClientNoShowsController {
     @Param('id', ParseUUIDPipe) id: string
   ): Promise<InitiateNoShowPaymentResponseDto> {
     return this.service.initiatePayment(user.sub, id);
+  }
+
+  @Post(':id/reconcile')
+  @ApiOperation({
+    summary:
+      'Authoritative reconciliation against Stripe. Retrieves the PaymentIntent directly and applies its status to the no_shows row, self-healing webhook delivery failures. Safe to call repeatedly; idempotent on terminal states.',
+  })
+  @ApiResponse({ status: 200, type: ReconcileNoShowResponseDto })
+  public async reconcile(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Param('id', ParseUUIDPipe) id: string
+  ): Promise<ReconcileNoShowResponseDto> {
+    return this.service.reconcile(user.sub, id);
   }
 }
 
