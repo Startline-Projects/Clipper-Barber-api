@@ -117,6 +117,7 @@ export class RecurringBookingsService {
     barberId: string,
     serviceIds: string[],
     dayOfWeek: number,
+    startDate?: string,
   ): Promise<RecurringSlotsResponseDto> {
     const unavailable: RecurringSlotsResponseDto = {
       dayOfWeek,
@@ -175,6 +176,9 @@ export class RecurringBookingsService {
       dayOfWeek,
       schedule.slot_duration_minutes,
     );
+    const todayLocal = localDateInTz(new Date(), barber.timezone);
+    const effectiveStart =
+      startDate && startDate > todayLocal ? startDate : todayLocal;
     const oneOffBlockedSlotMs = await this.fetchOneOffBlockedSlotMs(
       barberId,
       dayOfWeek,
@@ -182,6 +186,7 @@ export class RecurringBookingsService {
       slotTimes,
       schedule.slot_duration_minutes,
       totalDuration,
+      effectiveStart,
     );
 
     const slots: RecurringSlotDto[] = slotTimes.map((time) => {
@@ -365,12 +370,12 @@ export class RecurringBookingsService {
     slotTimes: string[],
     slotDurationMinutes: number,
     totalDuration: number,
+    startLocalDate: string,
   ): Promise<Set<string>> {
     const blockedTimes = new Set<string>();
     if (slotTimes.length === 0) return blockedTimes;
 
-    const todayLocal = localDateInTz(new Date(), timezone);
-    const matchingDates = nextMatchingDates(todayLocal, dayOfWeek, RECURRING_WINDOW_DAYS);
+    const matchingDates = nextMatchingDates(startLocalDate, dayOfWeek, RECURRING_WINDOW_DAYS);
     if (matchingDates.length === 0) return blockedTimes;
 
     // Build the set of candidate grid-slot start ms we need to check. For each
@@ -450,6 +455,7 @@ export class RecurringBookingsService {
       dayOfWeek: dto.dayOfWeek,
       slotTime: dto.slotTime,
       frequency: dto.frequency,
+      requestedStartDate: dto.startDate,
       autoAccept: false,
     });
   }
@@ -492,6 +498,7 @@ export class RecurringBookingsService {
     slotTime: string;
     frequency: RecurringBookingFrequency | 'weekly' | 'biweekly';
     autoAccept: boolean;
+    requestedStartDate?: string;
   }): Promise<RecurringBookingResponseDto> {
     const {
       clientAuthId,
@@ -501,6 +508,7 @@ export class RecurringBookingsService {
       slotTime,
       frequency,
       autoAccept,
+      requestedStartDate,
     } = args;
 
     const barber = await this.fetchBarber(barberId);
@@ -579,7 +587,17 @@ export class RecurringBookingsService {
 
     const nowIso = new Date().toISOString();
     const initialStatus = autoAccept ? 'active' : 'pending_barber_approval';
-    const today = autoAccept ? localDateInTz(new Date(), barber.timezone) : null;
+    const todayLocal = localDateInTz(new Date(), barber.timezone);
+
+    // Client-supplied startDate: optional anchor for the recurring window.
+    // Must be today-or-future in the barber timezone; the generator will snap
+    // to the first matching day_of_week on or after this date when the row
+    // becomes active. We persist it on pending rows too so the eventual
+    // barber acceptance does not overwrite the client's intent.
+    if (requestedStartDate !== undefined && requestedStartDate < todayLocal) {
+      throw new BadRequestException('startDate must be today or in the future.');
+    }
+    const windowStartDate = requestedStartDate ?? (autoAccept ? todayLocal : null);
 
     const { data: inserted, error } = await this.db
       .from('recurring_bookings')
@@ -594,7 +612,8 @@ export class RecurringBookingsService {
         duration_minutes: totalDuration,
         status: initialStatus,
         is_renewal: false,
-        ...(autoAccept ? { barber_accepted_at: nowIso, window_start_date: today } : {}),
+        window_start_date: windowStartDate,
+        ...(autoAccept ? { barber_accepted_at: nowIso } : {}),
       })
       .select('*')
       .single();
@@ -688,13 +707,19 @@ export class RecurringBookingsService {
 
     const nowIso = new Date().toISOString();
     const today = localDateInTz(new Date(), await this.fetchBarberTimezone(row.barber_id));
+    // If the client pre-set a future startDate on the offer, honor it. Past
+    // pre-set dates (e.g. the offer aged) fall back to today so generation
+    // doesn't anchor in the past.
+    const previousWindowStart = row.window_start_date;
+    const effectiveWindowStart =
+      previousWindowStart && previousWindowStart >= today ? previousWindowStart : today;
 
     const { data: updated, error } = await this.db
       .from('recurring_bookings')
       .update({
         status: 'active',
         barber_accepted_at: nowIso,
-        window_start_date: today,
+        window_start_date: effectiveWindowStart,
       })
       .eq('id', recurringBookingId)
       .eq('barber_id', barberAuthId)
@@ -710,13 +735,15 @@ export class RecurringBookingsService {
       await this.generator.generate(recurringBookingId);
     } catch (genErr) {
       // Roll the row back to pending so a hard-failed generate never leaves
-      // an `active` arrangement with zero occupancy.
+      // an `active` arrangement with zero occupancy. Restore the pre-accept
+      // window_start_date (may be the client-provided future date) instead
+      // of nulling, so the client's intent survives a retry.
       await this.db
         .from('recurring_bookings')
         .update({
           status: 'pending_barber_approval',
           barber_accepted_at: null,
-          window_start_date: null,
+          window_start_date: previousWindowStart,
         })
         .eq('id', recurringBookingId);
       throw new InternalServerErrorException(

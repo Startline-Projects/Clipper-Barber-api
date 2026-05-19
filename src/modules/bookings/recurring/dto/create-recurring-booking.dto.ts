@@ -1,10 +1,12 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayMinSize,
   IsEnum,
   IsInt,
+  IsISO8601,
+  IsOptional,
   IsUUID,
   Matches,
   Max,
@@ -50,4 +52,13 @@ export class CreateRecurringBookingDto {
   @ApiProperty({ enum: RecurringBookingFrequency, example: RecurringBookingFrequency.WEEKLY })
   @IsEnum(RecurringBookingFrequency)
   frequency: RecurringBookingFrequency;
+
+  @ApiPropertyOptional({
+    example: '2026-05-26',
+    description:
+      'YYYY-MM-DD. Optional. When set, the recurring window anchors here instead of the date the barber accepts. The first generated occurrence is the next matching dayOfWeek on or after this date. Must be today or future in the barber timezone.',
+  })
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  startDate?: string;
 }

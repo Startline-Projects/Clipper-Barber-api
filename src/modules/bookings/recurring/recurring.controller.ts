@@ -146,7 +146,12 @@ export class ClientRecurringSlotsController {
     @Param('barberId', ParseUUIDPipe) barberId: string,
     @Query() query: GetRecurringSlotsQueryDto
   ): Promise<RecurringSlotsResponseDto> {
-    return this.recurringService.getRecurringSlots(barberId, query.serviceIds, query.dayOfWeek);
+    return this.recurringService.getRecurringSlots(
+      barberId,
+      query.serviceIds,
+      query.dayOfWeek,
+      query.startDate,
+    );
   }
 }
 
@@ -277,6 +282,11 @@ export class BarberRecurringSlotsController {
     @CurrentUser() user: SupabaseUserPayload,
     @Query() query: GetRecurringSlotsQueryDto
   ): Promise<RecurringSlotsResponseDto> {
-    return this.recurringService.getRecurringSlots(user.sub, query.serviceIds, query.dayOfWeek);
+    return this.recurringService.getRecurringSlots(
+      user.sub,
+      query.serviceIds,
+      query.dayOfWeek,
+      query.startDate,
+    );
   }
 }

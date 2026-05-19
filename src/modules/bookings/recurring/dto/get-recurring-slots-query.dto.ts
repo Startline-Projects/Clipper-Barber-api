@@ -1,6 +1,15 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
-import { ArrayMaxSize, ArrayMinSize, IsInt, IsUUID, Max, Min } from 'class-validator';
+import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  IsInt,
+  IsISO8601,
+  IsOptional,
+  IsUUID,
+  Max,
+  Min,
+} from 'class-validator';
 import { MAX_SERVICES_PER_BOOKING } from '../../dto/preview-booking.dto';
 
 const toStringArray = (value: unknown): string[] => {
@@ -28,4 +37,13 @@ export class GetRecurringSlotsQueryDto {
   @Min(0)
   @Max(6)
   dayOfWeek: number;
+
+  @ApiPropertyOptional({
+    example: '2026-05-26',
+    description:
+      'YYYY-MM-DD. Optional. When supplied, slot availability is checked against one-off bookings on matching days from this date forward instead of from today. Useful for skipping near-term booked dates.',
+  })
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  startDate?: string;
 }

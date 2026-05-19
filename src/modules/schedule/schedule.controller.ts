@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Patch, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { EmailVerifiedGuard } from '../auth/guards/email-verified.guard';
+// [EMAIL_VERIFICATION_DISABLED] Temporarily disabled — re-enable to require verified email before barbers can update schedule.
+// import { EmailVerifiedGuard } from '../auth/guards/email-verified.guard';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -32,7 +33,8 @@ export class ScheduleController {
   }
 
   @Patch(':dayOfWeek')
-  @UseGuards(EmailVerifiedGuard)
+  // [EMAIL_VERIFICATION_DISABLED] Temporarily disabled — re-enable to block unverified barbers from updating their schedule.
+  // @UseGuards(EmailVerifiedGuard)
   @ApiOperation({ summary: 'Update a single schedule day (partial update)' })
   @ApiBody({ type: UpdateScheduleDayDto })
   @ApiResponse({ status: 200, description: 'Schedule day updated', type: ScheduleDayResponseDto })
