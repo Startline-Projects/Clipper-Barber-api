@@ -47,6 +47,9 @@ export class BarberProfileResponseDto {
   @ApiProperty()
   onboarding_complete: boolean;
 
+  @ApiProperty({ description: 'True once the barber has verified their email via OTP' })
+  emailVerified: boolean;
+
   @ApiProperty()
   allowAutoConfirm: boolean;
 

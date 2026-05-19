@@ -14,6 +14,7 @@ import { BarberStep2Dto } from './dto/barber-step2.dto';
 import { BarberStep3Dto } from './dto/barber-step3.dto';
 import { BarberSignupCategoriesDto } from './dto/barber-step4.dto';
 import { normalizeCategories } from '../../common/enums/barber-category-tag.enum';
+import { ChangeEmailDto } from './dto/change-email.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ClientRegisterDto } from './dto/client-register.dto';
 import { GoogleLoginDto } from './dto/google-login.dto';
@@ -521,9 +522,21 @@ export class AuthService {
     return { success: true };
   }
 
-  public async resetPassword(token: string, newPassword: string): Promise<SuccessResponseDto> {
-    const { data, error } = await this.client.auth.verifyOtp({
-      token_hash: token,
+  /**
+   * OTP-based password reset. The user receives a 6-digit code via
+   * forgotPassword (Supabase recovery email template configured with
+   * {{ .Token }}), then submits { email, code, newPassword } here.
+   * No URL redirect, no deep links — same OTP shape as verify-email.
+   */
+  public async resetPassword(
+    email: string,
+    code: string,
+    newPassword: string
+  ): Promise<SuccessResponseDto> {
+    const anonClient = this.supabaseService.getAuthClient();
+    const { data, error } = await anonClient.auth.verifyOtp({
+      email,
+      token: code,
       type: 'recovery',
     });
 
@@ -539,6 +552,65 @@ export class AuthService {
       throw new InternalServerErrorException(messages.password.UPDATE_FAILED);
     }
 
+    return { success: true };
+  }
+
+  /**
+   * Change the authenticated user's email. Re-authenticates with the current
+   * password (same defence as changePassword), then uses supabase admin to set
+   * the new email immediately with email_confirm: true so the user keeps their
+   * session. The role row's email_verified_at is cleared, and a fresh 6-digit
+   * OTP is dispatched to the new address — the user verifies via the existing
+   * POST /auth/verify-email with the new email.
+   */
+  public async changeEmail(
+    user: SupabaseUserPayload,
+    dto: ChangeEmailDto
+  ): Promise<SuccessResponseDto> {
+    if (!user.email) {
+      throw new UnauthorizedException(messages.auth.INVALID_TOKEN);
+    }
+
+    const normalizedNew = dto.newEmail.trim().toLowerCase();
+    if (normalizedNew === user.email.toLowerCase()) {
+      throw new BadRequestException(messages.auth.EMAIL_SAME_AS_CURRENT);
+    }
+
+    const anonClient = this.supabaseService.getAuthClient();
+    const { error: signInError } = await anonClient.auth.signInWithPassword({
+      email: user.email,
+      password: dto.currentPassword,
+    });
+
+    if (signInError) {
+      throw new UnauthorizedException(messages.password.CURRENT_INVALID);
+    }
+
+    const { error: updateError } = await this.client.auth.admin.updateUserById(user.sub, {
+      email: normalizedNew,
+      email_confirm: true,
+    });
+
+    if (updateError) {
+      const msg = updateError.message?.toLowerCase() ?? '';
+      if (msg.includes('already') || msg.includes('exists') || msg.includes('registered')) {
+        throw new ConflictException(messages.auth.EMAIL_TAKEN);
+      }
+      throw new InternalServerErrorException(messages.auth.EMAIL_CHANGE_FAILED);
+    }
+
+    const role = user.user_metadata?.role === 'barber' ? 'barber' : 'client';
+    const table = role === 'barber' ? 'barbers' : 'clients';
+    const { error: roleUpdateError } = await this.client
+      .from(table)
+      .update({ email_verified_at: null })
+      .eq('user_id', user.sub);
+
+    if (roleUpdateError) {
+      throw new InternalServerErrorException(messages.auth.EMAIL_CHANGE_FAILED);
+    }
+
+    this.sendVerificationOtp(normalizedNew);
     return { success: true };
   }
 

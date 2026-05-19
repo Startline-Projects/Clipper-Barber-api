@@ -23,6 +23,7 @@ import { BarberStep1Dto } from './dto/barber-step1.dto';
 import { BarberStep2Dto } from './dto/barber-step2.dto';
 import { BarberStep3Dto } from './dto/barber-step3.dto';
 import { BarberSignupCategoriesDto } from './dto/barber-step4.dto';
+import { ChangeEmailDto } from './dto/change-email.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ClientRegisterDto } from './dto/client-register.dto';
 import { GoogleLoginDto } from './dto/google-login.dto';
@@ -261,22 +262,45 @@ export class AuthController {
   }
 
   @Post('reset-password')
-  @ApiOperation({ summary: 'Reset password using OTP token from email link' })
+  @ApiOperation({
+    summary: 'Reset password using the 6-digit OTP from the recovery email',
+    description:
+      'Validates the OTP via Supabase and sets the new password. The recovery email template must use {{ .Token }} so the user receives a 6-digit code (no URL redirect).',
+  })
   @ApiBody({
     schema: {
       type: 'object',
-      required: ['token', 'newPassword'],
+      required: ['email', 'code', 'newPassword'],
       properties: {
-        token: { type: 'string', description: 'token_hash from the Supabase reset email link' },
+        email: { type: 'string', format: 'email', example: 'user@example.com' },
+        code: { type: 'string', minLength: 6, maxLength: 6, example: '123456' },
         newPassword: { type: 'string', minLength: 8, example: 'NewSecurePass1!' },
       },
     },
   })
   @ApiResponse({ status: 201, description: 'Password updated', type: SuccessResponseDto })
   public resetPassword(
-    @Body('token') token: string,
+    @Body('email') email: string,
+    @Body('code') code: string,
     @Body('newPassword') newPassword: string
   ): Promise<SuccessResponseDto> {
-    return this.authService.resetPassword(token, newPassword);
+    return this.authService.resetPassword(email, code, newPassword);
+  }
+
+  @Patch('change-email')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Change email while authenticated (barber or client)',
+    description:
+      'Re-authenticates with the current password, updates the email at the Supabase auth level (auto-confirmed so the session stays valid), clears email_verified_at on the role row, and dispatches a fresh 6-digit OTP to the new address. The user verifies via POST /auth/verify-email with the new email.',
+  })
+  @ApiBody({ type: ChangeEmailDto })
+  @ApiResponse({ status: 200, description: 'Email updated — verification OTP sent', type: SuccessResponseDto })
+  public changeEmail(
+    @CurrentUser() user: SupabaseUserPayload,
+    @Body() dto: ChangeEmailDto
+  ): Promise<SuccessResponseDto> {
+    return this.authService.changeEmail(user, dto);
   }
 }

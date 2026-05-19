@@ -15,7 +15,10 @@
     "EMAIL_ALREADY_VERIFIED": "Email is already verified",
     "EMAIL_RESEND_FAILED": "Could not resend verification email",
     "EMAIL_NOT_FOUND": "No account found for this email",
-    "EMAIL_NOT_VERIFIED": "Please verify your email address to continue. Check your inbox for the 6-digit code or tap Resend code."
+    "EMAIL_NOT_VERIFIED": "Please verify your email address to continue. Check your inbox for the 6-digit code or tap Resend code.",
+    "EMAIL_TAKEN": "This email is already in use by another account",
+    "EMAIL_SAME_AS_CURRENT": "The new email must differ from your current one",
+    "EMAIL_CHANGE_FAILED": "Failed to update email"
   },
   "barber": {
     "PROFILE_UPDATE_FAILED": "Failed to update barber profile — profile row may not exist yet",

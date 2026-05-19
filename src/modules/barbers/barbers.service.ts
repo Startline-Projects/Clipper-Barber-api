@@ -792,6 +792,7 @@ export class BarbersService {
       no_show_charge_enabled,
       no_show_charge_amount_usd,
       stripe_connect_account_id,
+      email_verified_at,
       latitude,
       longitude,
       ...rest
@@ -801,6 +802,7 @@ export class BarbersService {
       ...rest,
       latitude,
       longitude,
+      emailVerified: !!email_verified_at,
       allowAutoConfirm: !!allow_auto_confirm,
       autoConfirmToday: !!auto_confirm_today,
       recurringEnabled: !!recurring_enabled,

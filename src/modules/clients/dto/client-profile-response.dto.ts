@@ -33,6 +33,9 @@ export class ClientProfileResponseDto {
   @ApiPropertyOptional({ type: String, nullable: true })
   email?: string | null;
 
+  @ApiProperty({ description: 'True once the client has verified their email via OTP' })
+  emailVerified: boolean;
+
   @ApiProperty({ description: 'Subscription state from Stripe' })
   subscriptionStatus: string;
 

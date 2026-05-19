@@ -99,6 +99,7 @@ interface ClientRow {
   subscription_status: string;
   subscription_expires_at: string | null;
   created_at: string;
+  email_verified_at: string | null;
 }
 
 interface UpcomingBookingRow {
@@ -366,7 +367,7 @@ export class ClientsService {
     const { data, error } = await this.db
       .from('clients')
       .select(
-        'user_id, name, username, profile_photo_url, subscription_status, subscription_expires_at, created_at'
+        'user_id, name, username, profile_photo_url, subscription_status, subscription_expires_at, created_at, email_verified_at'
       )
       .eq('user_id', clientAuthId)
       .maybeSingle();
@@ -404,6 +405,7 @@ export class ClientsService {
       username: row.username ?? null,
       profilePhotoUrl: row.profile_photo_url ?? null,
       email,
+      emailVerified: !!row.email_verified_at,
       subscriptionStatus: row.subscription_status,
       subscriptionExpiresAt: row.subscription_expires_at ?? null,
       createdAt: new Date(row.created_at).toISOString(),
