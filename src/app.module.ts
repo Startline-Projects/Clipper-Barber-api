@@ -14,6 +14,7 @@ import { NoShowsModule } from './modules/no-shows/no-shows.module';
 import { MessagesModule } from './modules/messages/messages.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { ReviewsModule } from './modules/reviews/reviews.module';
+import { RemindersModule } from './modules/reminders/reminders.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { ReviewsModule } from './modules/reviews/reviews.module';
     MessagesModule,
     NotificationsModule,
     ReviewsModule,
+    RemindersModule,
   ],
   controllers: [AppController],
   providers: [AppService],

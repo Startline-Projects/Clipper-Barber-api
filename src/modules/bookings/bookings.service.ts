@@ -9,6 +9,7 @@ import { SupabaseService } from '../supabase/supabase.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationTypeDto } from '../notifications/dto/notification.dto';
 import { ConversationsService } from '../messages/conversations.service';
+import { RemindersService } from '../reminders/reminders.service';
 import { BookingTypeDto, PreviewBookingDto } from './dto/preview-booking.dto';
 import {
   BookingPreviewDto,
@@ -153,7 +154,8 @@ export class BookingsService {
   constructor(
     private readonly supabaseService: SupabaseService,
     private readonly notificationsService: NotificationsService,
-    private readonly conversationsService: ConversationsService
+    private readonly conversationsService: ConversationsService,
+    private readonly remindersService: RemindersService
   ) {}
 
   private get db() {
@@ -749,6 +751,9 @@ export class BookingsService {
     // Fire-and-forget — createAndSendNotification swallows its own errors
     void this.notifyBarberOfBookingCancel(bookingId, clientId);
 
+    // Cancel any pending email reminders for this booking (best-effort).
+    void this.remindersService.onBookingCancelled(bookingId).catch(() => undefined);
+
     return { booking };
   }
 
@@ -907,6 +912,11 @@ export class BookingsService {
       ctx.barberProfile.user_id,
       ctx.clientAuthId
     );
+
+    // Precompute email reminders for this booking (best-effort).
+    void this.remindersService
+      .onBookingCreated(row.id)
+      .catch(() => undefined);
 
     return { booking };
   }
